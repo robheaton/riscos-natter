@@ -41,6 +41,7 @@
 #define LEFT_EDGE (LEFT_W + SB)		/* the left pane and its scroll bar */
 #define RIGHT_EDGE (RIGHT_W + SB)
 #define TEXT_X (LEFT_EDGE + PAD + TS_W + NICK_W + GAP)	/* where the text starts, from the left edge of the window */
+#define MIN_W (TEXT_X + RIGHT_EDGE + 340)		/* the narrowest window: the text column keeps room for about 40 characters */
 
 /* ---- colours: 0xBBGGRR00 ---- */
 #define COL_TEXT 0x00000000
@@ -73,6 +74,8 @@ static char *history[MAXHIST]; static int nhist, hpos = -1;
 static unsigned long generation;
 static FILE *logf;
 
+static char logpath[200];
+
 static void dlog (const char *fmt, ...)
 {
   va_list ap;
@@ -81,6 +84,14 @@ static void dlog (const char *fmt, ...)
   fputc ('\n', logf); fflush (logf);
 }
 #define LOG dlog
+
+/* the Pi holds back what is written to the NAS until the file is closed: close it and open it again, so that what has been logged so far can be read */
+static void log_sync (void)
+{
+  if (!logf || !logpath[0]) return;
+  fclose (logf);
+  logf = fopen (logpath, "a");
+}
 
 /* ---- text and fonts ---- */
 
@@ -303,6 +314,8 @@ static void select_buffer (int i)
   force_redraw (win_main);
   refresh_lists ();
   Icon_SetCaret (win_input, ic_input);
+  LOG ("selected buffer %d: %s", cur, bufs[cur]->name);
+  log_sync ();
 }
 
 /* a line for a buffer */
@@ -737,6 +750,8 @@ static BOOL left_click (event_pollblock *event, void *reference)
   (void) reference;
   Wimp_GetWindowState (win_left, &st);
   row = ((st.openblock.screenrect.max.y - st.openblock.scroll.y) - event->data.mouse.pos.y - 4) / LISTLH;
+  LOG ("click in the buffer list: button %d, pos %d,%d, window top %d scroll %d, row %d of %d", (int) event->data.mouse.button.value, event->data.mouse.pos.x, event->data.mouse.pos.y, st.openblock.screenrect.max.y, st.openblock.scroll.y, row, nbufs);
+  log_sync ();
   if (row >= 0 && row < nbufs && event->data.mouse.pos.y > 0) select_buffer (row);
   Icon_SetCaret (win_input, ic_input);
   return TRUE;
@@ -744,7 +759,9 @@ static BOOL left_click (event_pollblock *event, void *reference)
 
 static BOOL focus_click (event_pollblock *event, void *reference)
 {
-  (void) event; (void) reference;
+  (void) reference;
+  LOG ("click in window %x: button %d", (unsigned) event->data.mouse.window, (int) event->data.mouse.button.value);
+  log_sync ();
   Icon_SetCaret (win_input, ic_input);
   return TRUE;
 }
@@ -816,7 +833,7 @@ static window_handle make_window (int x0, int y0, int x1, int y1, unsigned flags
   wb.colours.cols.titlefore = 7; wb.colours.cols.titleback = 2; wb.colours.cols.workfore = 7; wb.colours.cols.workback = (unsigned char) back;
   wb.colours.cols.scrollouter = 3; wb.colours.cols.scrollinner = 1; wb.colours.cols.titlefocus = 12;
   wb.workarearect.min.x = 0; wb.workarearect.max.x = wx; wb.workarearect.max.y = 0; wb.workarearect.min.y = -wy;
-  wb.workflags.value = 0;
+  wb.workflags.value = 3u << 12;						/* the button type of the work area: 3 = clicks are reported (0 would report none, and the windows have no icons to click) */
   wb.spritearea = 1;
   wb.minsize.x = minw; wb.minsize.y = minh;				/* the Wimp opens a window at least this big: only the main window needs a real minimum */
   if (title && title == titlebuf)					/* indirected title text, so that Window_SetTitle works */
@@ -835,7 +852,7 @@ static void make_windows (void)
 {
   wimp_point off, size;
   icon_createblock ic;
-  win_main = make_window (80, 120, 1480, 860, 0xBF000002u, 0, 1400, 600, titlebuf, 900, 400);	/* vertical scroll bar, size box, title bar with indirected text; not redrawn by the Wimp */
+  win_main = make_window (80, 120, 1480, 860, 0xBF000002u, 0, 1400, 600, titlebuf, MIN_W, 400);	/* vertical scroll bar, size box, title bar with indirected text; not redrawn by the Wimp */
   Pane2_AddMain (win_main);
   /* the panes: flags 0x90000000 is a window with a vertical scroll bar and nothing else, 0x80000000 one with nothing: neither can be moved */
   win_left = make_window (80, 120, 80 + LEFT_W, 700, 0x90000000u | 0x20u, 1, LEFT_W, 600, "", 20, 20);
@@ -899,10 +916,9 @@ int main (void)
 {
   irc_config cfg;
   {									/* the log goes to the NAS in a new file for each run: it can be read from there even if the machine freezes */
-    char path[200];
-    snprintf (path, sizeof path, "LanMan98::RISCOS.$.Development.GCC.riscos64.irc64.log.nl%ld", (long) time (NULL));
-    logf = fopen (path, "w");
-    if (!logf) logf = fopen ("NVMe::NVMe.$.natterlog", "w");
+    snprintf (logpath, sizeof logpath, "LanMan98::RISCOS.$.Development.GCC.riscos64.irc64.log.nl%ld", (long) time (NULL));
+    logf = fopen (logpath, "w");
+    if (!logf) { logpath[0] = 0; logf = fopen ("NVMe::NVMe.$.natterlog", "w"); }
   }
   LOG ("Natter starting");
   Event_Initialise ("Natter");
@@ -955,9 +971,15 @@ int main (void)
     unsigned long polls = 0;
     for (;;)
       {
-	if (polls < 300) LOG ("poll %lu", polls);
+	if (polls < 30) LOG ("poll %lu", polls);
 	Event_PollIdle (5);
-	if (polls < 300) LOG ("poll %lu returned event %d (window %x)", polls, (int) event_lastevent.type, (unsigned) event_lastevent.data.openblock.window);
+	if (polls < 30) LOG ("poll %lu returned event %d (window %x)", polls, (int) event_lastevent.type, (unsigned) event_lastevent.data.openblock.window);
+	else if (event_lastevent.type != 0 && event_lastevent.type != 1)				/* anything but a null event or a redraw */
+	  {
+	    if (event_lastevent.type == 6) LOG ("event: mouse click, window %x icon %d button %d at %d,%d", (unsigned) event_lastevent.data.mouse.window, (int) event_lastevent.data.mouse.icon, (int) event_lastevent.data.mouse.button.value, event_lastevent.data.mouse.pos.x, event_lastevent.data.mouse.pos.y);
+	    else LOG ("event: type %d window %x", (int) event_lastevent.type, (unsigned) event_lastevent.data.openblock.window);
+	    log_sync ();
+	  }
 	polls++;
       }
   }
