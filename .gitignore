@@ -1,3 +1,5 @@
 spike/out/
 *.o
 build/
+core/test_irc
+core/fuzz_irc
