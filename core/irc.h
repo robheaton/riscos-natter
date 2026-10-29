@@ -6,7 +6,7 @@
 
    Handles the IRCv3 capability negotiation (CAP LS 302, REQ, ACK, NAK, NEW, DEL), SASL PLAIN, the tags of IRCv3 messages (server-time, msgid, account), nick collisions during
    registration, PING, the 005 server settings, CTCP (ACTION, and automatic replies to VERSION and PING), idle detection, and a send queue with a flood limit.
-   What it does not do yet: channel and user lists (the next step), DCC, SASL EXTERNAL and SCRAM, batches. */
+   Keeps the list of channels with their topics, modes and members.  What it does not do yet: DCC, SASL EXTERNAL and SCRAM, batches, WHOX. */
 #ifndef NATTER_IRC_H
 #define NATTER_IRC_H
 
@@ -24,7 +24,7 @@ typedef struct
 {
   irc_tag tags[IRC_MAX_TAGS];
   int ntags;
-  const char *prefix;				/* the whole prefix, or NULL */
+  const char *prefix;				/* the same as nick: the prefix is split in place, so the rest of "nick!user@host" is only in user and host; NULL if there is none */
   const char *nick, *user, *host;		/* the parts of the prefix (nick is the server name for a server); NULL if absent */
   const char *command;				/* upper case: PRIVMSG, or three digits */
   const char *params[IRC_MAX_PARAMS];
@@ -75,10 +75,10 @@ enum irc_event_type
   IRC_EV_CTCP,		/* any other CTCP: arg = the command, text = the rest, reply = 1 if it came in a NOTICE */
   IRC_EV_JOIN,		/* from joined target; account is the account of extended-join (NULL if none), text the real name */
   IRC_EV_PART,		/* from left target, text = the reason */
-  IRC_EV_QUIT,		/* from left the network, text = the reason */
-  IRC_EV_NICK,		/* from is now called arg (our own nick is updated before the event) */
+  IRC_EV_QUIT,		/* from left the network, text = the reason: one event for each channel we share with from (target = the channel), or one without a target */
+  IRC_EV_NICK,		/* from is now called arg: one event for each channel we share (target = the channel) or one without a target; our own nick is updated before the event */
   IRC_EV_KICK,		/* from kicked arg out of target, text = the reason; self is set when arg is us */
-  IRC_EV_TOPIC,		/* from set the topic of target to text */
+  IRC_EV_TOPIC,		/* the topic of target is text: set by from, or (numeric 332) the topic that the server tells us when we join */
   IRC_EV_MODE,		/* from changed modes of target: text = the modes and their arguments */
   IRC_EV_INVITE,	/* from invites arg to target */
   IRC_EV_NUMERIC,	/* any other numeric reply: numeric = the code, target = our nick, text = the other parameters joined with spaces; msg has them one by one */
@@ -86,7 +86,12 @@ enum irc_event_type
   IRC_EV_CAP,		/* capability negotiation: arg = LS, ACK, NAK, NEW or DEL, text = the capability names */
   IRC_EV_SASL_OK,
   IRC_EV_SASL_FAIL,	/* text = the server's words; the numeric field has the code */
-  IRC_EV_TIMEOUT	/* nothing has been heard for ping_idle_cs + ping_timeout_cs: close the connection and reconnect */
+  IRC_EV_TIMEOUT,	/* nothing has been heard for ping_idle_cs + ping_timeout_cs: close the connection and reconnect */
+  IRC_EV_NAMES,		/* the member list of target is complete (366); it has also been filled in while it was arriving */
+  IRC_EV_ACCOUNT,	/* from logged in to the account arg, or out (arg NULL): account-notify */
+  IRC_EV_AWAY,		/* from is away (text = the message) or back (text NULL): away-notify */
+  IRC_EV_CHGHOST,	/* from now has the user name arg and the host text: chghost */
+  IRC_EV_SETNAME	/* from now has the real name text: setname */
 };
 
 typedef struct
@@ -131,6 +136,51 @@ void irc_action (irc_conn *c, const char *target, const char *text);	/* /me */
 void irc_set_nick (irc_conn *c, const char *nick);
 void irc_set_topic (irc_conn *c, const char *channel, const char *topic);	/* topic NULL asks for the topic */
 void irc_quit (irc_conn *c, const char *reason);
+
+/* ---- channels and the people in them ----
+
+   The core keeps the list of channels that we are in and who is in them, from JOIN, PART, KICK, QUIT, NICK, NAMES, MODE and the notifications of the account-notify, away-notify,
+   chghost and setname capabilities.  The state is already up to date when the event for a change arrives (for our own PART or KICK the channel is removed after the callback returns,
+   so it can still be read inside it).  The pointers below stay valid until the next call of irc_conn_input, irc_conn_start or irc_conn_free. */
+
+typedef struct
+{
+  char *nick, *user, *host;		/* user and host are NULL until they are known (userhost-in-names, JOIN, WHO) */
+  char *account;			/* NULL if not logged in or not known */
+  char *realname;			/* NULL if not known */
+  int away;
+  int refs;				/* (internal) the number of channels the user is in */
+} irc_user;
+
+typedef struct
+{
+  irc_user *user;
+  unsigned prefix;			/* bit i is set when the member has the i-th mode of the server's PREFIX; bit 0 is the highest (q or o) */
+} irc_member;
+
+typedef struct irc_channel irc_channel;
+
+size_t irc_conn_nchannels (irc_conn *c);
+const irc_channel *irc_conn_channel_at (irc_conn *c, size_t i);		/* in the order of joining */
+const irc_channel *irc_conn_channel (irc_conn *c, const char *name);	/* NULL if we are not in it */
+const char *irc_channel_name (const irc_channel *ch);
+const char *irc_channel_topic (const irc_channel *ch);			/* "" if there is none */
+const char *irc_channel_topic_by (const irc_channel *ch);		/* the nick or nick!user@host that set it, or "" */
+unsigned long irc_channel_topic_time (const irc_channel *ch);		/* Unix time, or 0 if not known */
+int irc_channel_synced (const irc_channel *ch);			/* the member list is complete (the NAMES reply has ended) */
+size_t irc_channel_nmembers (const irc_channel *ch);
+const irc_member *irc_channel_member (irc_conn *c, const irc_channel *ch, size_t i);	/* in the order of the nicks, case folded; i < irc_channel_nmembers */
+const irc_member *irc_channel_find (irc_conn *c, const irc_channel *ch, const char *nick);
+size_t irc_channel_modestring (const irc_channel *ch, char *buf, size_t size);	/* "+ntk secret" (the modes without a list); returns the length, always terminated */
+const char *irc_conn_prefix_modes (irc_conn *c);			/* the PREFIX modes from highest to lowest: "qaohv" ("ov" before 005) */
+const char *irc_conn_prefix_symbols (irc_conn *c);			/* and their symbols: "~&@%+" */
+int irc_member_rank (irc_conn *c, const irc_member *m);		/* 0 for the highest prefix ... the number of prefixes for none: sort by this, then by nick */
+char irc_member_symbol (irc_conn *c, const irc_member *m);		/* the symbol of the highest prefix, or 0 */
+const irc_user *irc_conn_user (irc_conn *c, const char *nick);		/* a person who shares a channel with us, or NULL */
+
+/* A check of the internal tables for the tests: the people sorted and without doubles, the members of every channel sorted, every member a known person, and the number of
+   channels of each person right.  Returns 0 if all is well, otherwise a number that says which check failed. */
+int irc_conn_selfcheck (irc_conn *c);
 
 /* What is known about the connection. */
 const char *irc_conn_nick (irc_conn *c);

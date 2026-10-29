@@ -146,8 +146,9 @@ static void test_names (void)
 
 /* ---- scripted conversations ---- */
 
-typedef struct { int type, self, reply, numeric; char from[64], target[64], text[1024], arg[64], time[40], account[40], msgid[40]; } ev_t;
+typedef struct { int type, self, reply, numeric, chan_members; char from[64], target[64], text[1024], arg[64], time[40], account[40], msgid[40]; } ev_t;
 static ev_t evs[256]; static int nev;
+static irc_conn *g_conn;						/* the connection of the test that is running: the callback looks at the state of the channel */
 
 static void on_event (void *ud, const irc_event *e)
 {
@@ -157,6 +158,12 @@ static void on_event (void *ud, const irc_event *e)
   x = &evs[nev++];
   memset (x, 0, sizeof *x);
   x->type = e->type; x->self = e->self; x->reply = e->reply; x->numeric = e->numeric;
+  x->chan_members = -1;
+  if (g_conn && e->target)
+    {
+      const irc_channel *ch = irc_conn_channel (g_conn, e->target);
+      if (ch) x->chan_members = (int) irc_channel_nmembers (ch);			/* -1: not a channel that we are in */
+    }
   #define COPY(f, s) if (e->s) snprintf (x->f, sizeof x->f, "%s", e->s)
   COPY (from, from); COPY (target, target); COPY (text, text); COPY (arg, arg); COPY (time, time); COPY (account, account); COPY (msgid, msgid);
   #undef COPY
@@ -243,9 +250,9 @@ static void test_cap_sasl (void)
   CHECK_STR (drain (c, 1), "");
   server (c, 2, ":irc CAP * LS :sasl=PLAIN,EXTERNAL away-notify unknown-thing\n");
   o = drain (c, 2);
-  CHECK_STR (o, "CAP REQ :server-time multi-prefix away-notify sasl\r\n");		/* only what we want and the server has, in our order; echo-message is not wanted */
+  CHECK_STR (o, "CAP REQ :server-time multi-prefix away-notify echo-message sasl\r\n");	/* only what we want and the server has, in our order */
   server (c, 3, ":irc CAP testnick ACK :server-time multi-prefix away-notify sasl\n");
-  CHECK (irc_conn_cap_enabled (c, "sasl")); CHECK (irc_conn_cap_enabled (c, "server-time")); CHECK (!irc_conn_cap_enabled (c, "echo-message"));
+  CHECK (irc_conn_cap_enabled (c, "sasl")); CHECK (irc_conn_cap_enabled (c, "server-time")); CHECK (!irc_conn_cap_enabled (c, "echo-message"));	/* asked for, not acknowledged */
   CHECK_STR (drain (c, 3), "AUTHENTICATE PLAIN\r\n");
   server (c, 4, "AUTHENTICATE +\n");
   o = drain (c, 4);
@@ -455,7 +462,9 @@ static void test_events (void)
   server (c, 17, ":op!o@h INVITE newname #secret\n");
   e = last_ev (IRC_EV_INVITE); CHECK_STR (e->arg, "newname"); CHECK_STR (e->target, "#secret");
   server (c, 18, ":irc 332 newname #chan :The topic of the channel\n");
-  e = last_ev (IRC_EV_NUMERIC); CHECK_INT (e->numeric, 332); CHECK_STR (e->target, "newname"); CHECK_STR (e->text, "#chan The topic of the channel");
+  e = last_ev (IRC_EV_TOPIC); CHECK_INT (e->numeric, 332); CHECK_STR (e->target, "#chan"); CHECK_STR (e->text, "The topic of the channel");	/* the topic that comes with a join  */
+  server (c, 18, ":irc 372 newname :- a line of the message of the day\n");
+  e = last_ev (IRC_EV_NUMERIC); CHECK_INT (e->numeric, 372); CHECK_STR (e->target, "newname"); CHECK_STR (e->text, "- a line of the message of the day");
   server (c, 19, "ERROR :Closing Link: (Quit)\n");
   CHECK_STR (last_ev (IRC_EV_ERROR)->text, "Closing Link: (Quit)");
   server (c, 20, ":irc UNKNOWNCMD x y\n");					/* ignored without harm */
@@ -660,7 +669,7 @@ static void test_cap_new_del (void)
   CHECK_STR (drain (c, 2), "CAP END\r\n");
   server (c, 3, ":irc 001 testnick :Welcome\n");
   server (c, 4, ":irc CAP testnick NEW :away-notify=x echo-message\n");		/* a capability that the server offers later and we want */
-  CHECK_STR (drain (c, 4), "CAP REQ :away-notify\r\n");
+  CHECK_STR (drain (c, 4), "CAP REQ :away-notify echo-message\r\n");
   server (c, 5, ":irc CAP testnick ACK :away-notify\n");
   CHECK (irc_conn_cap_enabled (c, "away-notify"));
   CHECK_STR (drain (c, 5), "");
@@ -668,6 +677,260 @@ static void test_cap_new_del (void)
   CHECK (!irc_conn_cap_enabled (c, "away-notify")); CHECK (!irc_conn_cap_enabled (c, "server-time"));
   server (c, 7, ":irc CAP testnick ACK :-server-time\n");				/* a capability switched off by the server */
   CHECK (!irc_conn_cap_enabled (c, "server-time"));
+  irc_conn_free (c);
+}
+
+
+/* ---- channels ---- */
+
+static const char *names_of (irc_conn *c, const irc_channel *ch)	/* "&admin %half @op ..." in the order of the list */
+{
+  static char buf[8][4096];
+  static int k;
+  char *b = buf[k++ & 7];
+  size_t i, n = 0;
+  b[0] = 0;
+  for (i = 0; i < irc_channel_nmembers (ch); i++)
+    {
+      const irc_member *m = irc_channel_member (c, ch, i);
+      char sym = irc_member_symbol (c, m);
+      n += (size_t) snprintf (b + n, 4096 - n, "%s%s%c%s", n ? " " : "", "", sym ? sym : '-', m->user->nick);
+    }
+  return b;
+}
+
+static int sorted (irc_conn *c, const irc_channel *ch)
+{
+  size_t i;
+  for (i = 1; i < irc_channel_nmembers (ch); i++)
+    if (irc_conn_casecmp (c, irc_channel_member (c, ch, i - 1)->user->nick, irc_channel_member (c, ch, i)->user->nick) >= 0) return 0;
+  return 1;
+}
+
+static irc_conn *in_network (irc_config *cfg)	/* registered, with a 005 line that has the usual PREFIX and CHANMODES */
+{
+  irc_conn *c = registered (cfg);
+  server (c, 2, ":irc 005 testnick CASEMAPPING=rfc1459 PREFIX=(qaohv)~&@%+ CHANTYPES=# CHANMODES=beI,k,l,imnpst :are supported\n");
+  g_conn = c;
+  nev = 0;
+  return c;
+}
+
+static void test_channels (void)
+{
+  irc_config cfg = basic ();
+  irc_conn *c = in_network (&cfg);
+  const irc_channel *ch;
+  const irc_member *m;
+  ev_t *e;
+  char ms[128];
+
+  /* we join: the channel exists at once, the modes are asked for, the list comes with 353 and ends with 366 */
+  server (c, 10, ":testnick!t@h.example JOIN #Chan\n");
+  CHECK_INT (irc_conn_nchannels (c), 1);
+  ch = irc_conn_channel (c, "#chan");						/* names are case-insensitive */
+  CHECK (ch != NULL); CHECK_STR (irc_channel_name (ch), "#Chan"); CHECK_INT (irc_channel_nmembers (ch), 1); CHECK (!irc_channel_synced (ch));
+  CHECK_STR (drain (c, 10), "MODE #Chan\r\n");
+  CHECK_INT (last_ev (IRC_EV_JOIN)->self, 1); CHECK_INT (last_ev (IRC_EV_JOIN)->chan_members, 1);
+  server (c, 11, ":irc 353 testnick = #Chan :@op +voice testnick plain @+bob!bu@bh.example\n:irc 353 testnick = #Chan :~owner &admin %half plain\n");
+  CHECK (!irc_channel_synced (ch));
+  CHECK_INT (count_ev (IRC_EV_NUMERIC), 0);					/* the list is not shown as numerics */
+  server (c, 12, ":irc 366 testnick #Chan :End of /NAMES list.\n");
+  CHECK (irc_channel_synced (ch)); CHECK_INT (count_ev (IRC_EV_NAMES), 1); CHECK_STR (last_ev (IRC_EV_NAMES)->target, "#Chan");
+  CHECK_INT (irc_channel_nmembers (ch), 8);					/* plain was listed twice */
+  CHECK_STR (names_of (c, ch), "&admin @bob %half @op ~owner -plain -testnick +voice");
+  CHECK (sorted (c, ch));
+  m = irc_channel_find (c, ch, "BOB");
+  CHECK (m != NULL); CHECK_STR (m->user->user, "bu"); CHECK_STR (m->user->host, "bh.example"); CHECK_INT (irc_member_rank (c, m), 2);	/* @ and + (multi-prefix): the highest counts */
+  CHECK_INT (irc_member_rank (c, irc_channel_find (c, ch, "plain")), 5); CHECK_INT (irc_member_symbol (c, irc_channel_find (c, ch, "plain")), 0);
+  CHECK_INT (irc_member_rank (c, irc_channel_find (c, ch, "owner")), 0);
+  CHECK (irc_channel_find (c, ch, "nobody") == NULL);
+  CHECK_STR (irc_conn_prefix_modes (c), "qaohv"); CHECK_STR (irc_conn_prefix_symbols (c), "~&@%+");
+
+  /* others come and go; the state is right when the event arrives */
+  server (c, 13, ":alice!au@ah JOIN #Chan aliceacct :Alice A\n");
+  CHECK_INT (irc_channel_nmembers (ch), 9); CHECK_INT (last_ev (IRC_EV_JOIN)->chan_members, 9);
+  CHECK_STR (irc_conn_user (c, "alice")->account, "aliceacct"); CHECK_STR (irc_conn_user (c, "alice")->realname, "Alice A"); CHECK_STR (irc_conn_user (c, "alice")->host, "ah");
+  server (c, 14, ":zed!z@h JOIN #unknown\n");					/* a channel that we are not in: the event comes, nothing is kept */
+  CHECK (irc_conn_user (c, "zed") == NULL); CHECK_INT (last_ev (IRC_EV_JOIN)->chan_members, -1);
+  server (c, 15, ":alice!au@ah PART #Chan :bye\n");
+  CHECK_INT (irc_channel_nmembers (ch), 8); CHECK_INT (last_ev (IRC_EV_PART)->chan_members, 8); CHECK (irc_conn_user (c, "alice") == NULL);	/* nobody shares a channel with us any more */
+  server (c, 16, ":op!o@h KICK #Chan plain :behave\n");
+  CHECK_INT (irc_channel_nmembers (ch), 7); CHECK (irc_channel_find (c, ch, "plain") == NULL); CHECK_INT (last_ev (IRC_EV_KICK)->self, 0);
+  server (c, 17, ":alice!au@ah PART #Chan\n");					/* leaving a channel that one is not in: harmless */
+  CHECK_INT (irc_channel_nmembers (ch), 7);
+
+  /* a second channel; a person in both */
+  server (c, 18, ":testnick!t@h.example JOIN #two\n:irc 353 testnick = #two :testnick bob voice\n:irc 366 testnick #two :End\n");
+  CHECK_INT (irc_conn_nchannels (c), 2);
+  CHECK_STR (irc_channel_name (irc_conn_channel_at (c, 0)), "#Chan"); CHECK_STR (irc_channel_name (irc_conn_channel_at (c, 1)), "#two");	/* in the order of joining */
+  nev = 0;
+  server (c, 19, ":bob!bu@bh.example NICK robert\n");
+  CHECK_INT (count_ev (IRC_EV_NICK), 2);					/* one event for each channel */
+  CHECK_STR (evs[0].target, "#Chan"); CHECK_STR (evs[1].target, "#two"); CHECK_STR (evs[0].arg, "robert"); CHECK_STR (evs[0].from, "bob");
+  CHECK (irc_conn_user (c, "bob") == NULL); CHECK (irc_conn_user (c, "robert") != NULL);
+  CHECK_STR (names_of (c, ch), "&admin %half @op ~owner @robert -testnick +voice");	/* renamed, in the new place, prefixes kept */
+  CHECK (sorted (c, ch)); CHECK (sorted (c, irc_conn_channel (c, "#two"))); CHECK_INT (irc_conn_selfcheck (c), 0);
+  nev = 0;
+  server (c, 20, ":robert!bu@bh.example QUIT :Ping timeout\n");
+  CHECK_INT (count_ev (IRC_EV_QUIT), 2); CHECK_STR (evs[0].target, "#Chan"); CHECK_STR (evs[1].target, "#two"); CHECK_STR (evs[0].text, "Ping timeout");
+  CHECK_INT (evs[0].chan_members, 6);
+  CHECK (irc_conn_user (c, "robert") == NULL); CHECK_INT (irc_channel_nmembers (ch), 6); CHECK_INT (irc_channel_nmembers (irc_conn_channel (c, "#two")), 2);
+  nev = 0;
+  server (c, 21, ":stranger!s@h QUIT :gone\n");					/* somebody we do not know: one event, no target */
+  CHECK_INT (count_ev (IRC_EV_QUIT), 1); CHECK_STR (evs[0].target, "");
+  nev = 0;
+  server (c, 22, ":testnick!t@h.example NICK ourselves\n");			/* our own nick: in both channels, and ours is updated */
+  CHECK_INT (count_ev (IRC_EV_NICK), 2); CHECK_INT (evs[0].self, 1); CHECK_STR (irc_conn_nick (c), "ourselves");
+  CHECK (irc_channel_find (c, ch, "ourselves") != NULL); CHECK (irc_channel_find (c, ch, "testnick") == NULL);
+
+  /* modes of members and of the channel */
+  server (c, 23, ":op!o@h MODE #Chan +o half\n");
+  CHECK_INT (irc_member_rank (c, irc_channel_find (c, ch, "half")), 2);		/* o is the third mode of qaohv: it wins over the h that half already has */
+  CHECK_INT (irc_member_symbol (c, irc_channel_find (c, ch, "half")), '@');
+  server (c, 24, ":op!o@h MODE #Chan -o+v op half\n");
+  CHECK_INT (irc_member_symbol (c, irc_channel_find (c, ch, "op")), 0);		/* op lost @ and has no other prefix */
+  CHECK_INT (irc_member_symbol (c, irc_channel_find (c, ch, "half")), '@');	/* half has o, h and v now */
+  CHECK_STR (last_ev (IRC_EV_MODE)->text, "-o+v op half");
+  server (c, 24, ":op!o@h MODE #Chan -o half\n");
+  CHECK_INT (irc_member_symbol (c, irc_channel_find (c, ch, "half")), '%');
+  server (c, 25, ":op!o@h MODE #Chan +nt-b+k *!*@bad.example secret\n");		/* b has an argument that is not kept; k has one that is */
+  irc_channel_modestring (ch, ms, sizeof ms); CHECK_STR (ms, "+knt secret");
+  server (c, 26, ":op!o@h MODE #Chan +l 50\n");
+  irc_channel_modestring (ch, ms, sizeof ms); CHECK_STR (ms, "+klnt secret 50");
+  server (c, 27, ":op!o@h MODE #Chan -k+i *\n");				/* -k takes an argument (type B), -l none (type C) */
+  irc_channel_modestring (ch, ms, sizeof ms); CHECK_STR (ms, "+ilnt 50");
+  server (c, 28, ":op!o@h MODE ourselves +i\n");				/* a user mode: shown, nothing kept */
+  CHECK_STR (last_ev (IRC_EV_MODE)->target, "ourselves");
+  nev = 0;
+  server (c, 29, ":irc 324 ourselves #Chan +ntk newkey\n");			/* the reply to our MODE query replaces the modes, and is shown as well */
+  irc_channel_modestring (ch, ms, sizeof ms); CHECK_STR (ms, "+knt newkey");
+  CHECK_INT (count_ev (IRC_EV_NUMERIC), 1);
+  { char tiny[4]; size_t n = irc_channel_modestring (ch, tiny, sizeof tiny); CHECK (n <= 3); CHECK_INT (tiny[n], 0); }	/* a small buffer is respected */
+
+  /* topics */
+  server (c, 30, ":irc 332 ourselves #Chan :The first topic\n:irc 333 ourselves #Chan setter!s@h 1700000000\n");
+  CHECK_STR (irc_channel_topic (ch), "The first topic"); CHECK_STR (irc_channel_topic_by (ch), "setter!s@h"); CHECK (irc_channel_topic_time (ch) == 1700000000UL);
+  server (c, 31, ":op!o@h TOPIC #Chan :A new topic\n");
+  CHECK_STR (irc_channel_topic (ch), "A new topic"); CHECK_STR (irc_channel_topic_by (ch), "op!o@h");
+  server (c, 32, ":irc 331 ourselves #Chan :No topic is set\n");
+  CHECK_STR (irc_channel_topic (ch), "");
+
+  /* the notifications */
+  nev = 0;
+  server (c, 33, ":voice!v@vh ACCOUNT voiceacct\n");
+  e = last_ev (IRC_EV_ACCOUNT); CHECK_STR (e->arg, "voiceacct"); CHECK_STR (irc_conn_user (c, "voice")->account, "voiceacct");
+  server (c, 34, ":voice!v@vh ACCOUNT *\n");
+  CHECK (irc_conn_user (c, "voice")->account == NULL); CHECK_STR (last_ev (IRC_EV_ACCOUNT)->arg, "");
+  server (c, 35, ":voice!v@vh AWAY :gone fishing\n");
+  CHECK_INT (irc_conn_user (c, "voice")->away, 1); CHECK_STR (last_ev (IRC_EV_AWAY)->text, "gone fishing");
+  server (c, 36, ":voice!v@vh AWAY\n");
+  CHECK_INT (irc_conn_user (c, "voice")->away, 0); CHECK_STR (last_ev (IRC_EV_AWAY)->text, "");
+  server (c, 37, ":voice!v@vh CHGHOST newuser new.host.example\n");
+  CHECK_STR (irc_conn_user (c, "voice")->user, "newuser"); CHECK_STR (irc_conn_user (c, "voice")->host, "new.host.example"); CHECK_STR (last_ev (IRC_EV_CHGHOST)->arg, "newuser");
+  server (c, 38, ":voice!newuser@new.host.example SETNAME :A New Name\n");
+  CHECK_STR (irc_conn_user (c, "voice")->realname, "A New Name"); CHECK_STR (last_ev (IRC_EV_SETNAME)->text, "A New Name");
+  server (c, 39, ":irc 352 ourselves #Chan wu wh.example irc voice G :0 Who Real Name\n");
+  CHECK_INT (irc_conn_user (c, "voice")->away, 1); CHECK_STR (irc_conn_user (c, "voice")->realname, "Who Real Name"); CHECK_STR (irc_conn_user (c, "voice")->user, "wu");
+  CHECK_INT (last_ev (IRC_EV_NUMERIC)->numeric, 352);				/* a WHO reply is shown too */
+
+  /* a NAMES for a channel that we are not in is only shown */
+  nev = 0;
+  server (c, 40, ":irc 353 ourselves = #other :a b c\n:irc 366 ourselves #other :End\n");
+  CHECK_INT (count_ev (IRC_EV_NUMERIC), 2); CHECK_INT (irc_conn_nchannels (c), 2);
+
+  /* our own PART: the channel can still be read in the callback, and is gone afterwards */
+  nev = 0;
+  server (c, 41, ":ourselves!t@h.example PART #two :leaving\n");
+  CHECK_INT (last_ev (IRC_EV_PART)->self, 1); CHECK_INT (last_ev (IRC_EV_PART)->chan_members, 2);	/* ourselves and voice are in #two */
+  CHECK_INT (irc_conn_nchannels (c), 1); CHECK (irc_conn_channel (c, "#two") == NULL); CHECK_INT (irc_conn_selfcheck (c), 0);
+  CHECK_INT (irc_conn_user (c, "voice") != NULL, 1);				/* still in #Chan */
+  server (c, 42, ":op!o@h KICK #Chan ourselves :out\n");
+  CHECK_INT (last_ev (IRC_EV_KICK)->self, 1); CHECK_INT (irc_conn_nchannels (c), 0); CHECK (irc_conn_user (c, "voice") == NULL);
+
+  /* joining again starts from nothing */
+  server (c, 43, ":ourselves!t@h.example JOIN #Chan\n:irc 353 ourselves = #Chan :ourselves other\n:irc 366 ourselves #Chan :End\n");
+  ch = irc_conn_channel (c, "#chan");
+  CHECK_INT (irc_channel_nmembers (ch), 2); CHECK_STR (irc_channel_topic (ch), ""); CHECK (irc_channel_synced (ch));
+  /* a new connection forgets all of it */
+  irc_conn_start (c, 100);
+  CHECK_INT (irc_conn_nchannels (c), 0); CHECK (irc_conn_user (c, "other") == NULL); CHECK_STR (irc_conn_prefix_modes (c), "ov");
+  g_conn = NULL;
+  irc_conn_free (c);						/* the leak checker of the sanitizer looks at what is left */
+}
+
+static void test_channel_edge_cases (void)
+{
+  irc_config cfg = basic ();
+  irc_conn *c = in_network (&cfg);
+  const irc_channel *ch;
+  server (c, 10, ":testnick!t@h JOIN #c\n:irc 353 testnick = #c :@a b c\n:irc 366 testnick #c :End\n");
+  ch = irc_conn_channel (c, "#c");
+  CHECK_INT (irc_channel_nmembers (ch), 4);
+  /* a nick change to a name that somebody has: the old holder (a missed quit) is forgotten */
+  server (c, 11, ":b!x@y NICK c\n");
+  CHECK_INT (irc_channel_nmembers (ch), 3); CHECK (sorted (c, ch)); CHECK_STR (names_of (c, ch), "@a -c -testnick");
+  /* a nick that only differs in case, and the [ ] \ ~ letters of rfc1459 */
+  server (c, 12, ":c!x@y NICK C[x]\n");
+  CHECK (irc_channel_find (c, ch, "c{x}") != NULL);
+  server (c, 13, ":c{x}!x@y QUIT\n");
+  CHECK_INT (irc_channel_nmembers (ch), 2);
+  /* rubbish in the middle of a list and in modes: nothing breaks */
+  server (c, 14, ":irc 353 testnick = #c :  ! !! @ ~~ @!u@h x!y\n:irc 366 testnick #c :End\n");
+  CHECK (sorted (c, ch)); CHECK_INT (irc_conn_selfcheck (c), 0);
+  server (c, 15, ":op!o@h MODE #c +ovvv-kl-\n:op!o@h MODE #c +\n:op!o@h MODE #c\n");
+  server (c, 16, ":irc 324 testnick #c\n:irc 332 testnick\n:irc 333 testnick #c\n:irc 352 testnick\n");
+  CHECK_INT (irc_conn_selfcheck (c), 0);
+  server (c, 17, ":x!y@z ACCOUNT\n:x!y@z AWAY\n:x!y@z CHGHOST\n:x!y@z SETNAME\n:x!y@z NICK\n:x!y@z KICK\n:x!y@z KICK #c\n:x!y@z JOIN\n:x!y@z PART\n:x!y@z TOPIC\n");
+  g_conn = NULL;
+  irc_conn_free (c);
+}
+
+static void test_casemapping_changes (void)
+{
+  irc_config cfg = basic ();
+  irc_conn *c = registered (&cfg);
+  const irc_channel *ch;
+  server (c, 2, ":irc 005 testnick CASEMAPPING=ascii CHANTYPES=# :are supported\n");
+  CHECK_INT (irc_conn_casemap (c), IRC_CASE_ASCII);
+  server (c, 3, ":testnick!t@h JOIN #c\n:irc 353 testnick = #c :a[x] a{x} B\n:irc 366 testnick #c :End\n");
+  ch = irc_conn_channel (c, "#c");
+  CHECK_INT (irc_channel_nmembers (ch), 4);					/* ascii: a[x] and a{x} are two people */
+  server (c, 4, ":irc 005 testnick CASEMAPPING=rfc1459 :are supported\n");	/* the mapping is fixed once we know somebody: this would put the list out of order */
+  CHECK_INT (irc_conn_casemap (c), IRC_CASE_ASCII); CHECK_INT (irc_conn_selfcheck (c), 0);
+  server (c, 5, ":a[x]!u@h QUIT\n:b!u@h QUIT\n");
+  CHECK_INT (irc_channel_nmembers (ch), 2); CHECK_INT (irc_conn_selfcheck (c), 0);
+  irc_conn_start (c, 100);							/* a new connection used to clear the people with the default mapping instead: freed memory was used */
+  CHECK_INT (irc_conn_casemap (c), IRC_CASE_RFC1459); CHECK_INT (irc_conn_nchannels (c), 0);
+  irc_conn_free (c);
+}
+
+static void test_big_channel (void)
+{
+  irc_config cfg = basic ();
+  irc_conn *c = in_network (&cfg);
+  const irc_channel *ch;
+  char line[2048];
+  int i, k, total = 30000;
+  server (c, 10, ":testnick!t@h JOIN #big\n");
+  for (i = 0; i < total; )
+    {
+      size_t n = (size_t) snprintf (line, sizeof line, ":irc 353 testnick = #big :");
+      for (k = 0; k < 40 && i < total; k++, i++) n += (size_t) snprintf (line + n, sizeof line - n, "%s%s%05d_n", k ? " " : "", i % 97 == 0 ? "@" : i % 31 == 0 ? "+" : "", (i * 7919) % total);
+      line[n++] = '\n'; line[n] = 0;
+      irc_conn_input (c, line, n, 11);
+    }
+  server (c, 12, ":irc 366 testnick #big :End\n");
+  ch = irc_conn_channel (c, "#big");
+  CHECK_INT (irc_channel_nmembers (ch), total + 1);					/* the numbers are all different, and we are in it too */
+  CHECK (sorted (c, ch));
+  for (i = 0; i < 1000; i++) { snprintf (line, sizeof line, ":%05d_n!u@h QUIT :bye\n", (i * 13) % total); server (c, 13, line); }
+  CHECK (sorted (c, ch));
+  for (i = 0; i < 1000; i++) { snprintf (line, sizeof line, ":%05d_n!u@h NICK new%05d\n", (i * 29 + 5) % total, i); server (c, 14, line); }
+  CHECK (sorted (c, ch));
+  CHECK (irc_channel_nmembers (ch) <= (size_t) total + 1 && irc_channel_nmembers (ch) >= (size_t) total - 1100);
+  CHECK_INT (irc_conn_selfcheck (c), 0);
+  g_conn = NULL;
   irc_conn_free (c);
 }
 
@@ -690,6 +953,10 @@ int main (void)
   test_idle ();
   test_reconnect ();
   test_cap_new_del ();
+  test_channels ();
+  test_channel_edge_cases ();
+  test_casemapping_changes ();
+  test_big_channel ();
   printf ("%d checks, %d failed\n", checks, fails);
   return fails != 0;
 }

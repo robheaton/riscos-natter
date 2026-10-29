@@ -3,75 +3,33 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "irc.h"
+#include "irc_priv.h"
 
-#define MAX_PAYLOAD 510			/* a line without its CR LF */
 #define SASL_CHUNK 400
-#define MAX_KV 512			/* limits against a server (or a fuzzer) that sends endless tokens or capabilities */
-#define MAX_ENABLED 256
-#define MAX_QUEUE 1000			/* lines waiting in the flood-limited queue; more are dropped */
 #define MAX_AUTO_QUEUE 20		/* automatic CTCP replies are only made while the queue is short */
-#define DEFAULT_CAPS "server-time message-tags multi-prefix userhost-in-names away-notify account-notify extended-join chghost cap-notify invite-notify setname sasl"
-
-typedef struct { char *name, *value; } kv;
-typedef struct { char **v; size_t n, cap; } strvec;
-typedef struct { char **lines; size_t n, cap, head; } lineq;
-
-struct irc_conn
-{
-  /* configuration (copies) */
-  char *cfg_nick, *cfg_user, *cfg_realname, *cfg_pass, *cfg_sasl_user, *cfg_sasl_pass, *cfg_version, *cfg_caps;
-  int sasl_required, burst;
-  unsigned interval, ping_idle, ping_timeout;
-  irc_event_fn fn;
-  void *ud;
-
-  /* connection state */
-  irc_linebuf lb;
-  unsigned now;				/* the time of the call that is running */
-  char *nick;				/* ours, as far as we know */
-  char *server, *network;
-  int registered, started, quitting;
-  int casemap;
-  kv *isupport; size_t nisupport, capisupport;
-  char *chantypes, *statusmsg;
-  lineq prio, normal;
-  int tokens; unsigned last_refill;
-  unsigned last_input, ping_sent_at; int ping_sent, timed_out;
-
-  /* capabilities */
-  int cap_done;				/* CAP END has been sent (or negotiation is not used) */
-  int cap_pending;			/* REQ lines sent and not yet answered */
-  kv *avail; size_t navail, capavail;	/* from LS */
-  int ls_open;				/* a multi-line LS is in progress */
-  strvec enabled, new_names;
-  int sasl_active;
-  char *sasl_payload; size_t sasl_len, sasl_sent;
-
-  char *scratch; size_t scratch_cap;
-};
+#define DEFAULT_CAPS "server-time message-tags multi-prefix userhost-in-names away-notify account-notify extended-join chghost cap-notify invite-notify setname echo-message sasl"
 
 /* ---- small helpers ---- */
 
-static void *xrealloc (void *p, size_t n) { p = realloc (p, n ? n : 1); if (!p) abort (); return p; }
-static char *xstrdup (const char *s) { size_t n; char *r; if (!s) return NULL; n = strlen (s) + 1; r = xrealloc (NULL, n); memcpy (r, s, n); return r; }
-static char *xstrndup (const char *s, size_t n) { char *r = xrealloc (NULL, n + 1); memcpy (r, s, n); r[n] = 0; return r; }
+void *xrealloc (void *p, size_t n) { p = realloc (p, n ? n : 1); if (!p) abort (); return p; }
+char *xstrdup (const char *s) { size_t n; char *r; if (!s) return NULL; n = strlen (s) + 1; r = xrealloc (NULL, n); memcpy (r, s, n); return r; }
+char *xstrndup (const char *s, size_t n) { char *r = xrealloc (NULL, n + 1); memcpy (r, s, n); r[n] = 0; return r; }
 
-static void strvec_add (strvec *v, const char *s)
+void strvec_add (strvec *v, const char *s)
 {
   if (v->n == v->cap) { v->cap = v->cap ? v->cap * 2 : 8; v->v = xrealloc (v->v, v->cap * sizeof *v->v); }
   v->v[v->n++] = xstrdup (s);
 }
-static void strvec_clear (strvec *v) { size_t i; for (i = 0; i < v->n; i++) free (v->v[i]); v->n = 0; }
-static int strvec_has (const strvec *v, const char *s) { size_t i; for (i = 0; i < v->n; i++) if (!strcmp (v->v[i], s)) return 1; return 0; }
-static void strvec_remove (strvec *v, const char *s)
+void strvec_clear (strvec *v) { size_t i; for (i = 0; i < v->n; i++) free (v->v[i]); v->n = 0; }
+int strvec_has (const strvec *v, const char *s) { size_t i; for (i = 0; i < v->n; i++) if (!strcmp (v->v[i], s)) return 1; return 0; }
+void strvec_remove (strvec *v, const char *s)
 {
   size_t i;
   for (i = 0; i < v->n; i++)
     if (!strcmp (v->v[i], s)) { free (v->v[i]); memmove (&v->v[i], &v->v[i + 1], (v->n - i - 1) * sizeof *v->v); v->n--; return; }
 }
 
-static void kv_set (kv **a, size_t *n, size_t *cap, const char *name, const char *value)
+void kv_set (kv **a, size_t *n, size_t *cap, const char *name, const char *value)
 {
   size_t i;
   for (i = 0; i < *n; i++)
@@ -80,14 +38,14 @@ static void kv_set (kv **a, size_t *n, size_t *cap, const char *name, const char
   if (*n == *cap) { *cap = *cap ? *cap * 2 : 16; *a = xrealloc (*a, *cap * sizeof **a); }
   (*a)[*n].name = xstrdup (name); (*a)[*n].value = xstrdup (value); (*n)++;
 }
-static void kv_remove (kv *a, size_t *n, const char *name)
+void kv_remove (kv *a, size_t *n, const char *name)
 {
   size_t i;
   for (i = 0; i < *n; i++)
     if (!strcmp (a[i].name, name)) { free (a[i].name); free (a[i].value); memmove (&a[i], &a[i + 1], (*n - i - 1) * sizeof *a); (*n)--; return; }
 }
-static const char *kv_get (const kv *a, size_t n, const char *name) { size_t i; for (i = 0; i < n; i++) if (!strcmp (a[i].name, name)) return a[i].value; return NULL; }
-static void kv_clear (kv *a, size_t *n) { size_t i; for (i = 0; i < *n; i++) { free (a[i].name); free (a[i].value); } *n = 0; }
+const char *kv_get (const kv *a, size_t n, const char *name) { size_t i; for (i = 0; i < n; i++) if (!strcmp (a[i].name, name)) return a[i].value; return NULL; }
+void kv_clear (kv *a, size_t *n) { size_t i; for (i = 0; i < *n; i++) { free (a[i].name); free (a[i].value); } *n = 0; }
 
 static void lineq_push (lineq *q, char *line)		/* takes the line */
 {
@@ -100,13 +58,13 @@ static char *lineq_peek (lineq *q) { return q->head < q->n ? q->lines[q->head] :
 static void lineq_pop (lineq *q) { free (q->lines[q->head]); q->lines[q->head++] = NULL; if (q->head == q->n) q->head = q->n = 0; }
 static void lineq_clear (lineq *q) { while (lineq_peek (q)) lineq_pop (q); }
 
-static void set_str (char **dst, const char *s) { free (*dst); *dst = xstrdup (s); }
+void set_str (char **dst, const char *s) { free (*dst); *dst = xstrdup (s); }
 
 /* ---- the queue of lines to send ---- */
 
 /* Builds "cmd [p1 [p2]] [:trailing]" with the rules of the protocol: the words in the middle have no space (they end at the first one), nothing has a CR, LF or NUL, and the line
    is cut at 510 bytes inside a character.  prio lines are not held back by the flood limit. */
-static void qline (irc_conn *c, int prio, const char *cmd, const char *p1, const char *p2, const char *trailing)
+void qline (irc_conn *c, int prio, const char *cmd, const char *p1, const char *p2, const char *trailing)
 {
   char buf[MAX_PAYLOAD + 8];
   size_t n = 0, room = MAX_PAYLOAD;
@@ -261,9 +219,9 @@ int irc_is_channel_name (irc_conn *c, const char *name)
 
 /* ---- events ---- */
 
-static void emit (irc_conn *c, irc_event *e) { if (c->fn) c->fn (c->ud, e); }
+void emit (irc_conn *c, irc_event *e) { if (c->fn) c->fn (c->ud, e); }
 
-static void ev_init (irc_conn *c, irc_event *e, int type, const irc_msg *m)
+void ev_init (irc_conn *c, irc_event *e, int type, const irc_msg *m)
 {
   memset (e, 0, sizeof *e);
   e->type = type;
@@ -278,7 +236,7 @@ static void ev_init (irc_conn *c, irc_event *e, int type, const irc_msg *m)
   e->self = m->nick && c->nick && !irc_casecmp (m->nick, c->nick, c->casemap);
 }
 
-static const char *param (const irc_msg *m, int i) { return i < m->nparams ? m->params[i] : ""; }
+const char *param (const irc_msg *m, int i) { return i < m->nparams ? m->params[i] : ""; }
 
 /* the parameters from index first on, joined with spaces, in a buffer of the connection */
 static const char *join_params (irc_conn *c, const irc_msg *m, int first)
@@ -513,10 +471,15 @@ static void handle_isupport (irc_conn *c, const irc_msg *m)
 	{
 	  kv_set (&c->isupport, &c->nisupport, &c->capisupport, tok, eq ? eq : "");
 	  if (!strcmp (tok, "CASEMAPPING") && eq)
-	    c->casemap = !strcmp (eq, "ascii") ? IRC_CASE_ASCII : !strcmp (eq, "strict-rfc1459") ? IRC_CASE_STRICT : IRC_CASE_RFC1459;
+	    {
+	      if (!c->nusers)						/* the order of the people we know depends on it: it is fixed once we know somebody */
+		c->casemap = !strcmp (eq, "ascii") ? IRC_CASE_ASCII : !strcmp (eq, "strict-rfc1459") ? IRC_CASE_STRICT : IRC_CASE_RFC1459;
+	    }
 	  else if (!strcmp (tok, "CHANTYPES")) set_str (&c->chantypes, eq ? eq : "");
 	  else if (!strcmp (tok, "STATUSMSG")) set_str (&c->statusmsg, eq ? eq : "");
 	  else if (!strcmp (tok, "NETWORK")) set_str (&c->network, eq ? eq : "");
+	  else if (!strcmp (tok, "PREFIX")) irc__chan_set_prefix (c, eq ? eq : "");
+	  else if (!strcmp (tok, "CHANMODES")) irc__chan_set_chanmodes (c, eq ? eq : "");
 	}
       free (tok);
     }
@@ -605,6 +568,7 @@ static void handle (irc_conn *c, irc_msg *m)
 {
   const char *cmd = m->command;
   irc_event e;
+  if (irc__chan_handle (c, m)) return;				/* JOIN, PART, KICK, QUIT, NICK, TOPIC, MODE, NAMES, ... : irc_chan.c */
   if (cmd[0] >= '0' && cmd[0] <= '9' && cmd[1] && cmd[2] && !cmd[3]) { handle_numeric (c, m, atoi (cmd)); return; }
   if (!strcmp (cmd, "PING")) { qline (c, 1, "PONG", NULL, NULL, m->nparams ? m->params[m->nparams - 1] : ""); return; }
   if (!strcmp (cmd, "PRIVMSG")) { handle_privmsg (c, m, 0); return; }
@@ -615,33 +579,7 @@ static void handle (irc_conn *c, irc_msg *m)
       if (c->sasl_active && !strcmp (param (m, 0), "+")) sasl_send_chunks (c);
       return;
     }
-  if (!strcmp (cmd, "JOIN"))
-    {
-      ev_init (c, &e, IRC_EV_JOIN, m);
-      e.target = param (m, 0);
-      if (m->nparams >= 3) { e.account = strcmp (m->params[1], "*") ? m->params[1] : NULL; e.text = m->params[2]; }	/* extended-join */
-      emit (c, &e);
-    }
-  else if (!strcmp (cmd, "PART")) { ev_init (c, &e, IRC_EV_PART, m); e.target = param (m, 0); e.text = param (m, 1); emit (c, &e); }
-  else if (!strcmp (cmd, "QUIT")) { ev_init (c, &e, IRC_EV_QUIT, m); e.text = param (m, 0); emit (c, &e); }
-  else if (!strcmp (cmd, "NICK"))
-    {
-      int mine = m->nick && c->nick && !irc_casecmp (m->nick, c->nick, c->casemap);
-      ev_init (c, &e, IRC_EV_NICK, m);
-      e.arg = param (m, 0);
-      if (mine) { e.self = 1; set_str (&c->nick, e.arg); }
-      emit (c, &e);
-    }
-  else if (!strcmp (cmd, "KICK"))
-    {
-      ev_init (c, &e, IRC_EV_KICK, m);
-      e.target = param (m, 0); e.arg = param (m, 1); e.text = param (m, 2);
-      e.self = !irc_casecmp (e.arg, c->nick, c->casemap);
-      emit (c, &e);
-    }
-  else if (!strcmp (cmd, "TOPIC")) { ev_init (c, &e, IRC_EV_TOPIC, m); e.target = param (m, 0); e.text = param (m, 1); emit (c, &e); }
-  else if (!strcmp (cmd, "MODE")) { ev_init (c, &e, IRC_EV_MODE, m); e.target = param (m, 0); e.text = join_params (c, m, 1); emit (c, &e); }
-  else if (!strcmp (cmd, "INVITE")) { ev_init (c, &e, IRC_EV_INVITE, m); e.arg = param (m, 0); e.target = param (m, 1); emit (c, &e); }
+  if (!strcmp (cmd, "INVITE")) { ev_init (c, &e, IRC_EV_INVITE, m); e.arg = param (m, 0); e.target = param (m, 1); emit (c, &e); }
   else if (!strcmp (cmd, "ERROR")) { ev_init (c, &e, IRC_EV_ERROR, m); e.text = param (m, 0); emit (c, &e); }
 }
 
@@ -663,6 +601,7 @@ void irc_conn_input (irc_conn *c, const char *data, size_t n, unsigned now)
 
 static void reset (irc_conn *c)
 {
+  irc__chan_reset (c);						/* first: the people are sorted by the case mapping that is still set */
   irc_linebuf_init (&c->lb);
   set_str (&c->nick, c->cfg_nick);
   free (c->server); c->server = NULL; free (c->network); c->network = NULL;
@@ -706,6 +645,7 @@ void irc_conn_free (irc_conn *c)
   kv_clear (c->avail, &c->navail); free (c->avail);
   strvec_clear (&c->enabled); free (c->enabled.v); strvec_clear (&c->new_names); free (c->new_names.v);
   lineq_clear (&c->prio); free (c->prio.lines); lineq_clear (&c->normal); free (c->normal.lines);
+  irc__chan_free (c);
   free (c->sasl_payload); free (c->scratch);
   free (c);
 }

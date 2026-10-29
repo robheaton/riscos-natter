@@ -40,6 +40,34 @@ static const char *corpus[] = {
   ":op!o@h INVITE testnick #secret",
   "ERROR :Closing Link",
   "X a b c d e f g h i j k l m n o p q r s t u v w",
+  ":testnick!t@h JOIN #chan",
+  ":testnick!t@h JOIN #two",
+  ":irc.example 353 testnick = #chan :@op +voice testnick plain bob!bu@bh.example @+carol ~owner &admin %half",
+  ":irc.example 353 testnick = #two :testnick bob carol dave",
+  ":irc.example 366 testnick #chan :End of /NAMES list.",
+  ":irc.example 366 testnick #two :End of /NAMES list.",
+  ":irc.example 324 testnick #chan +ntk key",
+  ":irc.example 332 testnick #chan :The topic",
+  ":irc.example 333 testnick #chan setter!s@h 1700000000",
+  ":irc.example 331 testnick #chan :No topic",
+  ":irc.example 352 testnick #chan u h irc bob G :0 Real Name",
+  ":op!o@h MODE #chan +ov-v op voice bob",
+  ":op!o@h MODE #chan +nt-b+kl *!*@x key 50",
+  ":bob!b@h JOIN #chan acct :Real Name",
+  ":bob!b@h JOIN #two",
+  ":carol!c@h NICK bob",
+  ":bob!b@h NICK carol",
+  ":bob!b@h ACCOUNT acct",
+  ":bob!b@h ACCOUNT *",
+  ":bob!b@h AWAY :gone",
+  ":bob!b@h AWAY",
+  ":bob!b@h CHGHOST newuser new.host",
+  ":bob!b@h SETNAME :A name",
+  ":bob!b@h PART #chan :bye",
+  ":op!o@h KICK #chan bob :out",
+  ":op!o@h KICK #two testnick :out",
+  ":testnick!t@h PART #chan",
+  ":irc.example 005 testnick CASEMAPPING=ascii PREFIX=(qaohv)~&@%+ CHANMODES=beI,k,l,imnpst CHANTYPES=#& :are supported",
 };
 #define NCORPUS ((int) (sizeof corpus / sizeof *corpus))
 
@@ -149,6 +177,12 @@ int main (int argc, char **argv)
 	  i += piece;
 	}
       if (it % 97 == 0) (void) irc_is_channel_name (c, "#x");
+      if (it % 251 == 0) { int rc = irc_conn_selfcheck (c); if (rc) { printf ("fuzz: the tables are inconsistent (check %d) after %ld iterations\n", rc, it); return 1; } }
+      if (getenv ("FUZZ_CHECK"))						/* debugging: check after every iteration and show the input that broke it */
+	{
+	  int rc = irc_conn_selfcheck (c);
+	  if (rc) { printf ("selfcheck %d after iteration %ld; the input was %zu bytes:\n", rc, it, n); fwrite (buf, 1, n, stdout); printf ("\n"); return 1; }
+	}
       if (getenv ("FUZZ_PROGRESS") && it % 1000 == 0) fprintf (stderr, "it %ld\n", it);
     }
   irc_conn_free (c);
