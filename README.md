@@ -1,15 +1,24 @@
 # Natter
 
-An IRC client for RISC OS 64 (AArch64), with a native Wimp front end: a window with a proportional-font scrollback, not a terminal.
+An IRC client for RISC OS 64 (AArch64), with a native Wimp front end: one window with the scrollback in the middle and panes around it (buffer list, topic, nick list, input line), not a terminal.
 
-**Status: early.** Nothing here is usable yet. What exists:
+**Status: early, but it connects.** It has been run on a Raspberry Pi 5 with RISC OS 64: it connects to a public IRC network with TLS (the certificate and the server name are checked), logs in, joins channels, and shows the conversation with timestamps, coloured nicks, actions, highlights for mentions, unread badges, a nick list with prefixes, Tab completion of nicks and a history of what you typed.
 
-* `spike/`: a test application (`!IRCSpike`) that shows a scrollback window with 10,000 generated chat lines, with its own redraw loop, built with DeskLib64. It was run on RISC OS 64 to check that the idea works: text in proportional fonts (UTF-8), colours, filled line backgrounds, a scroll bar. `spike/build.sh` builds it, `spike/deploy.sh` copies it to a machine.
+## What is where
 
-## Plan
+| Folder | What |
+|---|---|
+| `core/` | the protocol library in portable C (no sockets inside): IRCv3 messages and tags, capability negotiation, SASL PLAIN, channels and the people in them, CTCP, a flood-limited send queue. `make test` runs 409 checks and a fuzzer under AddressSanitizer. |
+| `app/` | the application: `natter.c` (windows, events, commands), `buffer.c` (the lines of a conversation and their wrapping), `net.c` (sockets and TLS with OpenSSL), `settings.c` (the choices file), `demo.c` (a pretend server). `make test` there runs the tests of buffer and settings; `tests/net/run.sh` the tests of net.c against local servers with their own CA. `build.sh` builds `out/!Natter` for RISC OS 64. |
+| `spike/` | the first test: a scrollback window with 10,000 lines, and `deploy.sh` that copies an application to the machine. |
+| `tests/` | the test programs. |
 
-1. `core/`: a protocol library in portable C with no sockets inside it (bytes in, events and commands out), tested on Linux against scripted server conversations: message parsing with IRCv3 tags, capability negotiation and SASL login, `005` server settings, channel and nick tracking, a rate-limited send queue.
-2. The Wimp application: a buffer list (networks and channels, with unread and highlight marks), the scrollback, a nick list, a topic bar and an input line.
-3. Sockets and TLS (OpenSSL) on RISC OS 64.
+## Using it
 
-64-bit only. Built with the [riscos-gcc16](https://github.com/robheaton/riscos-gcc16) RISC OS 64 tool chain and DeskLib64.
+Start `!Natter`. It starts disconnected. `/help` lists the commands. `/connect NAME` connects to a network of your choices (`/networks` lists them), `/connect host [port] [notls]` to any server, `/savenet NAME` keeps it in `Choices:Natter.Choices` (plain text: look at it), `/demo` shows a made-up conversation. Double-click a nick to talk to that person.
+
+## Not done yet
+
+A dialog for the networks, logs (plain text, one file for each channel, with an off switch), menus and an iconbar icon, reconnecting, IRC colour codes, links, selecting and copying text.
+
+64-bit only. Built with the [riscos-gcc16](https://github.com/robheaton/riscos-gcc16) RISC OS 64 tool chain, DeskLib64 and OpenSSL.

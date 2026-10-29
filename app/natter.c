@@ -7,6 +7,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <sys/stat.h>
 #include "DeskLib:Core.h"
 #include "DeskLib:Event.h"
 #include "DeskLib:EventMsg.h"
@@ -27,6 +28,7 @@
 #include "buffer.h"
 #include "demo.h"
 #include "net.h"
+#include "settings.h"
 
 /* ---- the geometry, in OS units ---- */
 #define LH 36				/* a row of the scrollback */
@@ -78,8 +80,11 @@ static FILE *logf;
 static net *srvlink;				/* the connection to a real server; NULL while the demonstration is the server */
 static int demo_active = 1;
 static int link_closed;				/* the net reported the end of the connection: it is freed by the idle loop */
-static char cfg_nick[48] = "natter_user", cfg_user[48] = "natter", cfg_real[64] = "Natter on RISC OS 64";
-static char autojoin[256];			/* channels to join after the welcome: the demonstration's own, or a list set by the user */
+static settings cfg_set;			/* the choices, from the file */
+static netsettings cur_net;			/* the network that is in use (a copy: /connect host makes one that is not in the file) */
+#define CHOICES_READ "Choices:Natter.Choices"
+#define CHOICES_WRITE "<Choices$Write>.Natter.Choices"
+static const char *current_nick (void) { return cur_net.nick[0] ? cur_net.nick : cfg_set.nick; }
 #define CA_FILE "<Natter$Dir>.Resources.ca-bundle"
 
 static char logpath[200];
@@ -387,7 +392,7 @@ static void on_event (void *ud, const irc_event *e)
       Icon_SetText (win_input, ic_nick, nicklabel);
       set_title ();
       if (demo_active) { irc_join (conn, "#riscos64", NULL); irc_join (conn, "#riscosdev", NULL); }
-      else if (autojoin[0]) irc_join (conn, autojoin, NULL);
+      else if (cur_net.autojoin[0]) irc_join (conn, cur_net.autojoin, NULL);
       break;
     case IRC_EV_PRIVMSG: case IRC_EV_NOTICE: case IRC_EV_ACTION:
       {
@@ -501,7 +506,7 @@ static void net_status_cb (void *ud, const char *text) { (void) ud; status_line 
 static void net_connected_cb (void *ud)
 {
   (void) ud;
-  status_line (LK_INFO, "Connected: logging in as %s", cfg_nick);
+  status_line (LK_INFO, "Connected: logging in as %s", current_nick ());
   irc_conn_start (conn, Time_Monotonic ());
   pump_output ();
 }
@@ -524,7 +529,12 @@ static irc_config make_config (void)
 {
   irc_config cfg;
   memset (&cfg, 0, sizeof cfg);
-  cfg.nick = cfg_nick; cfg.user = cfg_user; cfg.realname = cfg_real; cfg.ctcp_version = "Natter 0.1 (RISC OS 64)";
+  cfg.nick = current_nick ();
+  cfg.user = cur_net.user[0] ? cur_net.user : cfg_set.user;
+  cfg.realname = cur_net.realname[0] ? cur_net.realname : cfg_set.realname;
+  cfg.ctcp_version = "Natter 0.1 (RISC OS 64)";
+  if (cur_net.sasl_user[0] && cur_net.sasl_pass[0]) { cfg.sasl_user = cur_net.sasl_user; cfg.sasl_pass = cur_net.sasl_pass; }
+  if (cur_net.password[0]) cfg.pass = cur_net.password;
   return cfg;
 }
 
@@ -547,21 +557,29 @@ static void clear_buffers (void)
   refresh_lists ();
 }
 
-static void connect_to (const char *host, int port, int tls)
+static void connect_network (const netsettings *n)
 {
   static const net_events evs = { net_status_cb, net_connected_cb, net_data_cb, net_closed_cb };
   irc_config cfg;
   drop_link ();
   demo_active = 0;
   clear_buffers ();
+  cur_net = *n;
   irc_conn_free (conn);
   cfg = make_config ();
   conn = irc_conn_new (&cfg, on_event, NULL);
-  snprintf (nicklabel, sizeof nicklabel, "%s", cfg_nick);
+  snprintf (nicklabel, sizeof nicklabel, "%s", current_nick ());
   Icon_SetText (win_input, ic_nick, nicklabel);
-  status_line (LK_INFO, "Connecting to %s port %d%s", host, port, tls ? " with TLS" : " (not encrypted)");
-  srvlink = net_open (host, port, tls, CA_FILE, 1, &evs, NULL);
-  if (!srvlink) link_closed = 0;						/* net_open has reported the failure */
+  status_line (LK_INFO, "Connecting to %s (%s port %d%s)", n->name, n->host, net_port (n), n->tls ? " with TLS" : ", not encrypted");
+  srvlink = net_open (n->host, net_port (n), n->tls, CA_FILE, 1, &evs, NULL);
+  if (!srvlink) link_closed = 0;					/* net_open has reported the failure */
+}
+
+static void save_settings (void)
+{
+  mkdir ("<Choices$Write>.Natter", 0777);
+  if (settings_save (&cfg_set, CHOICES_WRITE) == 0) status_line (LK_INFO, "The choices are saved in %s", CHOICES_WRITE);
+  else status_line (LK_ERROR, "The choices could not be saved in %s", CHOICES_WRITE);
 }
 
 static void go_demo (void)
@@ -574,7 +592,7 @@ static void go_demo (void)
   cfg = make_config ();
   conn = irc_conn_new (&cfg, on_event, NULL);
   status_line (LK_INFO, "The demonstration: the server is made up.");
-  demo_start (feed_from_server, NULL, cfg_nick);
+  demo_start (feed_from_server, NULL, current_nick ());
   irc_conn_start (conn, Time_Monotonic ());
   pump_output ();
 }
@@ -601,22 +619,49 @@ static void run_command (char *line)
   else if (!strcasecmp (cmd, "me")) { if (b->kind != BK_STATUS) irc_action (conn, b->name, arg); }
   else if (!strcasecmp (cmd, "nick"))
     {
-      if (*arg) { snprintf (cfg_nick, sizeof cfg_nick, "%s", arg); if (!srvlink || net_connected (srvlink)) irc_set_nick (conn, arg); }
+      if (*arg) { snprintf (cfg_set.nick, sizeof cfg_set.nick, "%s", arg); cur_net.nick[0] = 0; if (!srvlink || net_connected (srvlink)) irc_set_nick (conn, arg); }
     }
   else if (!strcasecmp (cmd, "connect") || !strcasecmp (cmd, "server"))
     {
-      char host[128]; int port = 0, tls = 1; char *w, *save = NULL;
-      host[0] = 0;
+      char name[128]; int port = 0, tls = 1, idx; char *w, *save = NULL;
+      name[0] = 0;
       for (w = strtok_r (arg, " ", &save); w; w = strtok_r (NULL, " ", &save))
 	{
 	  if (!strcasecmp (w, "notls")) tls = 0;
-	  else if (!host[0]) snprintf (host, sizeof host, "%s", w);
+	  else if (!name[0]) snprintf (name, sizeof name, "%s", w);
 	  else if (atoi (w) > 0) port = atoi (w);
 	}
-      if (!host[0]) status_line (LK_ERROR, "Usage: /connect host [port] [notls]    (the port is 6697, or 6667 with notls)");
-      else connect_to (host, port ? port : tls ? 6697 : 6667, tls);
+      if (!name[0] && cfg_set.nnets == 1) snprintf (name, sizeof name, "%s", cfg_set.nets[0].name);
+      if (!name[0]) status_line (LK_ERROR, "Usage: /connect NAME (a network of the choices; /networks lists them) or /connect host [port] [notls]");
+      else if ((idx = settings_find (&cfg_set, name)) >= 0) connect_network (&cfg_set.nets[idx]);
+      else
+	{
+	  netsettings adhoc;
+	  memset (&adhoc, 0, sizeof adhoc);
+	  snprintf (adhoc.name, sizeof adhoc.name, "%s", name); snprintf (adhoc.host, sizeof adhoc.host, "%s", name);
+	  adhoc.port = port; adhoc.tls = tls; adhoc.log = -1;
+	  connect_network (&adhoc);
+	}
     }
-  else if (!strcasecmp (cmd, "autojoin")) { snprintf (autojoin, sizeof autojoin, "%s", arg); status_line (LK_INFO, "The channels that are joined after connecting: %s", autojoin[0] ? autojoin : "none"); }
+  else if (!strcasecmp (cmd, "networks"))
+    {
+      int i;
+      if (!cfg_set.nnets) status_line (LK_INFO, "There are no networks in the choices. Connect with /connect host, then /savenet NAME.");
+      for (i = 0; i < cfg_set.nnets; i++) status_line (LK_INFO, "%s: %s port %d%s%s", cfg_set.nets[i].name, cfg_set.nets[i].host, net_port (&cfg_set.nets[i]), cfg_set.nets[i].tls ? " with TLS" : "", cfg_set.nets[i].autoconnect ? ", connects at start" : "");
+    }
+  else if (!strcasecmp (cmd, "autojoin")) { snprintf (cur_net.autojoin, sizeof cur_net.autojoin, "%s", arg); status_line (LK_INFO, "The channels that are joined after connecting: %s (/savenet keeps them)", cur_net.autojoin[0] ? cur_net.autojoin : "none"); }
+  else if (!strcasecmp (cmd, "savenet"))
+    {
+      if (!*arg) status_line (LK_ERROR, "Usage: /savenet NAME: keeps the network you are connected to under that name");
+      else if (!cur_net.host[0]) status_line (LK_ERROR, "Not connected to a network yet");
+      else
+	{
+	  netsettings *n = settings_add (&cfg_set, arg);
+	  if (!n) status_line (LK_ERROR, "There is no room for another network");
+	  else { char keep[48]; snprintf (keep, sizeof keep, "%s", n->name); *n = cur_net; snprintf (n->name, sizeof n->name, "%s", keep); save_settings (); }
+	}
+    }
+  else if (!strcasecmp (cmd, "save")) save_settings ();
   else if (!strcasecmp (cmd, "disconnect")) { if (srvlink) { drop_link (); status_line (LK_INFO, "Disconnected"); } else status_line (LK_INFO, "Not connected"); }
   else if (!strcasecmp (cmd, "demo")) go_demo ();
   else if (!strcasecmp (cmd, "msg") || !strcasecmp (cmd, "query") || !strcasecmp (cmd, "q"))
@@ -628,7 +673,7 @@ static void run_command (char *line)
   else if (!strcasecmp (cmd, "topic")) { if (b->kind == BK_CHANNEL) irc_set_topic (conn, b->name, *arg ? arg : NULL); }
   else if (!strcasecmp (cmd, "quit")) { irc_quit (conn, *arg ? arg : "Natter"); }
   else if (!strcasecmp (cmd, "raw") || !strcasecmp (cmd, "quote")) irc_send_raw (conn, arg);
-  else if (!strcasecmp (cmd, "help")) status_line (LK_INFO, "Commands: /connect host [port] [notls], /disconnect, /demo, /autojoin #a,#b, /join, /part, /me, /nick, /msg, /query, /topic, /quit, /raw");
+  else if (!strcasecmp (cmd, "help")) status_line (LK_INFO, "Commands: /connect NAME or host [port] [notls], /networks, /savenet NAME, /autojoin #a,#b, /disconnect, /demo, /join, /part, /me, /nick, /msg, /query, /topic, /quit, /raw");
   else status_line (LK_ERROR, "Unknown command: /%s (try /help)", cmd);
 }
 
@@ -1094,6 +1139,12 @@ int main (void)
   Event_Claim (event_OPEN, win_main, event_ANY, main_open_handler, NULL);
   Event_Claim (event_CLOSE, win_main, event_ANY, close_handler, NULL);
   Event_Claim (event_NULL, event_ANY, event_ANY, null_handler, NULL);
+  settings_load (&cfg_set, CHOICES_READ);
+  if (cfg_set.nnets == 0)								/* no choices yet: a first network to start from */
+    {
+      netsettings *n = settings_add (&cfg_set, "Libera.Chat");
+      if (n) { snprintf (n->host, sizeof n->host, "irc.libera.chat"); n->tls = 1; }
+    }
   cfg = make_config ();
   conn = irc_conn_new (&cfg, on_event, NULL);
   bufs[0] = buffer_new ("Status", BK_STATUS, 0); nbufs = 1; cur = 0;
@@ -1103,16 +1154,14 @@ int main (void)
   LOG ("windows open");
   { window_state st; Wimp_GetWindowState (win_main, &st); main_h = st.openblock.screenrect.max.y - st.openblock.screenrect.min.y; win_width = 0; }
   log_geometry ("opened");
-  LOG ("title");
   set_title ();
-  LOG ("first status line");
-  status_line (LK_INFO, "Natter 0.1 on RISC OS 64. This is a demonstration: the server is made up. Type /help for the commands.");
-  LOG ("starting the demo");
-  demo_start (feed_from_server, NULL, cfg.nick);
-  irc_conn_start (conn, Time_Monotonic ());
-  LOG ("core started");
-  pump_output ();
-  LOG ("output pumped");
+  demo_active = 0;
+  status_line (LK_INFO, "Natter 0.1 for RISC OS 64. /help lists the commands; /networks the networks of your choices; /connect NAME connects; /demo shows a made-up conversation.");
+  {
+    int k, started = 0;
+    for (k = 0; k < cfg_set.nnets && !started; k++) if (cfg_set.nets[k].autoconnect) { connect_network (&cfg_set.nets[k]); started = 1; }
+    if (!started) status_line (LK_INFO, "Not connected. Try /connect %s", cfg_set.nets[0].name);
+  }
   Icon_SetCaret (win_input, ic_input);
   LOG ("caret set");
   log_geometry ("before polling");
