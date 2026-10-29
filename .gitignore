@@ -3,3 +3,5 @@ spike/out/
 build/
 core/test_irc
 core/fuzz_irc
+app/out/
+app/test_buffer
