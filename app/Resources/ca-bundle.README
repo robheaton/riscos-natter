@@ -1,0 +1,2 @@
+ca-bundle: the list of root certificates that Mozilla trusts, as distributed by the curl project (https://curl.se/docs/caextract.html).
+Mozilla Public License 2.0.  It is what the certificate of an IRC server is checked against.

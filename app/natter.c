@@ -21,10 +21,12 @@
 #include "DeskLib:SWI.h"
 #include "DeskLib:Time.h"
 #include "DeskLib:Pane2.h"
+#include "DeskLib:Screen.h"
 #include "DeskLib:Error.h"
 #include "irc.h"
 #include "buffer.h"
 #include "demo.h"
+#include "net.h"
 
 /* ---- the geometry, in OS units ---- */
 #define LH 36				/* a row of the scrollback */
@@ -73,6 +75,12 @@ static int win_width, main_h;			/* the visible width and height of the main wind
 static char *history[MAXHIST]; static int nhist, hpos = -1;
 static unsigned long generation;
 static FILE *logf;
+static net *srvlink;				/* the connection to a real server; NULL while the demonstration is the server */
+static int demo_active = 1;
+static int link_closed;				/* the net reported the end of the connection: it is freed by the idle loop */
+static char cfg_nick[48] = "natter_user", cfg_user[48] = "natter", cfg_real[64] = "Natter on RISC OS 64";
+static char autojoin[256];			/* channels to join after the welcome: the demonstration's own, or a list set by the user */
+#define CA_FILE "<Natter$Dir>.Resources.ca-bundle"
 
 static char logpath[200];
 
@@ -205,12 +213,18 @@ static buffer *get_buffer (const char *name, int kind)
 
 static int total_height (const buffer *b) { return TOP_H + (int) buffer_total_rows (b) * LH + BOT_H + 8; }
 
+/* The Wimp lets the user drag a window no bigger than its work area, so the work area of the main window is never smaller than the screen; the scrolling is held to the real content. */
+static int content_height (void) { return total_height (bufs[cur]); }
+
 static void set_main_extent (void)
 {
   wimp_box ext;
-  int h = total_height (bufs[cur]);
-  if (h < main_h) h = main_h;						/* the Wimp makes a window no taller than its work area */
-  ext.min.x = 0; ext.max.x = win_width > 0 ? win_width : 2000; ext.max.y = 0; ext.min.y = -h;
+  int h = content_height (), w = win_width;
+  Screen_CacheModeInfo ();
+  if (h < screen_size.y) h = screen_size.y;
+  if (h < main_h) h = main_h;
+  if (w < screen_size.x) w = screen_size.x;
+  ext.min.x = 0; ext.max.x = w; ext.max.y = 0; ext.min.y = -h;
   Wimp_SetExtent (win_main, &ext);
 }
 
@@ -372,7 +386,8 @@ static void on_event (void *ud, const irc_event *e)
       snprintf (nicklabel, sizeof nicklabel, "%s", own);
       Icon_SetText (win_input, ic_nick, nicklabel);
       set_title ();
-      irc_join (conn, "#riscos64", NULL); irc_join (conn, "#riscosdev", NULL);
+      if (demo_active) { irc_join (conn, "#riscos64", NULL); irc_join (conn, "#riscosdev", NULL); }
+      else if (autojoin[0]) irc_join (conn, autojoin, NULL);
       break;
     case IRC_EV_PRIVMSG: case IRC_EV_NOTICE: case IRC_EV_ACTION:
       {
@@ -458,6 +473,12 @@ static void pump_output (void)
 {
   char out[8192];
   size_t n;
+  if (!demo_active)
+    {
+      while (srvlink && net_connected (srvlink) && net_pending (srvlink) < 16384 && (n = irc_conn_output (conn, Time_Monotonic (), out, sizeof out)) > 0)
+	if (net_send (srvlink, out, n) != 0) break;
+      return;
+    }
   while ((n = irc_conn_output (conn, Time_Monotonic (), out, sizeof out)) > 0)
     {
       char *p = out;
@@ -471,6 +492,91 @@ static void pump_output (void)
 	  p = eol + 2;
 	}
     }
+}
+
+/* ---- a connection to a real server ---- */
+
+static void net_status_cb (void *ud, const char *text) { (void) ud; status_line (LK_INFO, "%s", text); }
+
+static void net_connected_cb (void *ud)
+{
+  (void) ud;
+  status_line (LK_INFO, "Connected: logging in as %s", cfg_nick);
+  irc_conn_start (conn, Time_Monotonic ());
+  pump_output ();
+}
+
+static void net_data_cb (void *ud, const char *buf, size_t n)
+{
+  (void) ud;
+  generation++;
+  irc_conn_input (conn, buf, n, Time_Monotonic ());
+}
+
+static void net_closed_cb (void *ud, const char *why)
+{
+  (void) ud;
+  status_line (LK_ERROR, "%s", why);
+  link_closed = 1;
+}
+
+static irc_config make_config (void)
+{
+  irc_config cfg;
+  memset (&cfg, 0, sizeof cfg);
+  cfg.nick = cfg_nick; cfg.user = cfg_user; cfg.realname = cfg_real; cfg.ctcp_version = "Natter 0.1 (RISC OS 64)";
+  return cfg;
+}
+
+static void drop_link (void)
+{
+  if (srvlink) { if (net_connected (srvlink)) { irc_quit (conn, "Natter"); pump_output (); } net_free (srvlink); srvlink = NULL; }
+  link_closed = 0;
+}
+
+/* forget the conversations of the demonstration or of the last server: only the status buffer stays */
+static void clear_buffers (void)
+{
+  int i;
+  for (i = 1; i < nbufs; i++) { buffer_free (bufs[i]); bufs[i] = NULL; }
+  nbufs = 1; cur = 0;
+  nicks_dirty = 1;
+  set_title ();
+  set_main_extent ();
+  force_redraw (win_main);
+  refresh_lists ();
+}
+
+static void connect_to (const char *host, int port, int tls)
+{
+  static const net_events evs = { net_status_cb, net_connected_cb, net_data_cb, net_closed_cb };
+  irc_config cfg;
+  drop_link ();
+  demo_active = 0;
+  clear_buffers ();
+  irc_conn_free (conn);
+  cfg = make_config ();
+  conn = irc_conn_new (&cfg, on_event, NULL);
+  snprintf (nicklabel, sizeof nicklabel, "%s", cfg_nick);
+  Icon_SetText (win_input, ic_nick, nicklabel);
+  status_line (LK_INFO, "Connecting to %s port %d%s", host, port, tls ? " with TLS" : " (not encrypted)");
+  srvlink = net_open (host, port, tls, CA_FILE, 1, &evs, NULL);
+  if (!srvlink) link_closed = 0;						/* net_open has reported the failure */
+}
+
+static void go_demo (void)
+{
+  irc_config cfg;
+  drop_link ();
+  demo_active = 1;
+  clear_buffers ();
+  irc_conn_free (conn);
+  cfg = make_config ();
+  conn = irc_conn_new (&cfg, on_event, NULL);
+  status_line (LK_INFO, "The demonstration: the server is made up.");
+  demo_start (feed_from_server, NULL, cfg_nick);
+  irc_conn_start (conn, Time_Monotonic ());
+  pump_output ();
 }
 
 /* ---- the input line ---- */
@@ -493,7 +599,26 @@ static void run_command (char *line)
   if (!strcasecmp (cmd, "join") || !strcasecmp (cmd, "j")) { if (*arg) irc_join (conn, arg, NULL); else status_line (LK_ERROR, "Usage: /join #channel"); }
   else if (!strcasecmp (cmd, "part") || !strcasecmp (cmd, "leave")) { if (b->kind == BK_CHANNEL) irc_part (conn, *arg ? arg : b->name, NULL); else status_line (LK_ERROR, "This is not a channel"); }
   else if (!strcasecmp (cmd, "me")) { if (b->kind != BK_STATUS) irc_action (conn, b->name, arg); }
-  else if (!strcasecmp (cmd, "nick")) { if (*arg) irc_set_nick (conn, arg); }
+  else if (!strcasecmp (cmd, "nick"))
+    {
+      if (*arg) { snprintf (cfg_nick, sizeof cfg_nick, "%s", arg); if (!srvlink || net_connected (srvlink)) irc_set_nick (conn, arg); }
+    }
+  else if (!strcasecmp (cmd, "connect") || !strcasecmp (cmd, "server"))
+    {
+      char host[128]; int port = 0, tls = 1; char *w, *save = NULL;
+      host[0] = 0;
+      for (w = strtok_r (arg, " ", &save); w; w = strtok_r (NULL, " ", &save))
+	{
+	  if (!strcasecmp (w, "notls")) tls = 0;
+	  else if (!host[0]) snprintf (host, sizeof host, "%s", w);
+	  else if (atoi (w) > 0) port = atoi (w);
+	}
+      if (!host[0]) status_line (LK_ERROR, "Usage: /connect host [port] [notls]    (the port is 6697, or 6667 with notls)");
+      else connect_to (host, port ? port : tls ? 6697 : 6667, tls);
+    }
+  else if (!strcasecmp (cmd, "autojoin")) { snprintf (autojoin, sizeof autojoin, "%s", arg); status_line (LK_INFO, "The channels that are joined after connecting: %s", autojoin[0] ? autojoin : "none"); }
+  else if (!strcasecmp (cmd, "disconnect")) { if (srvlink) { drop_link (); status_line (LK_INFO, "Disconnected"); } else status_line (LK_INFO, "Not connected"); }
+  else if (!strcasecmp (cmd, "demo")) go_demo ();
   else if (!strcasecmp (cmd, "msg") || !strcasecmp (cmd, "query") || !strcasecmp (cmd, "q"))
     {
       char *text = strchr (arg, ' ');
@@ -503,7 +628,7 @@ static void run_command (char *line)
   else if (!strcasecmp (cmd, "topic")) { if (b->kind == BK_CHANNEL) irc_set_topic (conn, b->name, *arg ? arg : NULL); }
   else if (!strcasecmp (cmd, "quit")) { irc_quit (conn, *arg ? arg : "Natter"); }
   else if (!strcasecmp (cmd, "raw") || !strcasecmp (cmd, "quote")) irc_send_raw (conn, arg);
-  else if (!strcasecmp (cmd, "help")) status_line (LK_INFO, "Commands: /join /part /me /nick /msg /query /topic /quit /raw");
+  else if (!strcasecmp (cmd, "help")) status_line (LK_INFO, "Commands: /connect host [port] [notls], /disconnect, /demo, /autojoin #a,#b, /join, /part, /me, /nick, /msg, /query, /topic, /quit, /raw");
   else status_line (LK_ERROR, "Unknown command: /%s (try /help)", cmd);
 }
 
@@ -757,6 +882,24 @@ static BOOL left_click (event_pollblock *event, void *reference)
   return TRUE;
 }
 
+/* the nick list: a double click on a nick opens a conversation with that person */
+static BOOL right_click (event_pollblock *event, void *reference)
+{
+  window_state st;
+  int row;
+  (void) reference;
+  Wimp_GetWindowState (win_right, &st);
+  row = ((st.openblock.screenrect.max.y - st.openblock.scroll.y) - event->data.mouse.pos.y - 4) / LISTLH - 1;	/* the first row is the number of users */
+  LOG ("click in the nick list: button %d, row %d of %d", (int) event->data.mouse.button.value, row, (int) nnicks);
+  if (event->data.mouse.button.data.select && row >= 0 && (size_t) row < nnicks && event->data.mouse.pos.y > 0)
+    {
+      const char *nk = nicks[row].user->nick;
+      if (irc_conn_casecmp (conn, nk, irc_conn_nick (conn))) select_buffer (buffer_index (get_buffer (nk, BK_QUERY)));
+    }
+  Icon_SetCaret (win_input, ic_input);
+  return TRUE;
+}
+
 static BOOL focus_click (event_pollblock *event, void *reference)
 {
   (void) reference;
@@ -773,6 +916,12 @@ static BOOL main_open_handler (event_pollblock *event, void *reference)
   main_h = ob->screenrect.max.y - ob->screenrect.min.y;
   win_width = ob->screenrect.max.x - ob->screenrect.min.x;
   set_main_extent ();
+  {									/* not further than the content: the extent is bigger than that */
+    int least = content_height () > main_h ? main_h - content_height () : 0;
+    if (ob->scroll.y < least) ob->scroll.y = least;
+    if (ob->scroll.y > 0) ob->scroll.y = 0;
+    ob->scroll.x = 0;
+  }
   set_pane_extent (win_left, nbufs + 1, LEFT_W);
   set_pane_extent (win_right, (int) nnicks + 1, RIGHT_W);
   Pane2_OpenWindow (win_main, ob);					/* the main window and the panes, at the size that was asked for */
@@ -782,6 +931,7 @@ static BOOL main_open_handler (event_pollblock *event, void *reference)
 static BOOL close_handler (event_pollblock *event, void *reference)
 {
   (void) event; (void) reference;
+  drop_link ();
   Event_CloseDown ();
   exit (0);
   return TRUE;
@@ -795,7 +945,8 @@ static BOOL null_handler (event_pollblock *event, void *reference)
   unsigned now = Time_Monotonic ();
   window_state st;
   (void) event; (void) reference;
-  demo_tick (now);
+  if (demo_active) demo_tick (now);
+  if (srvlink) { net_poll (srvlink); if (link_closed) { net_free (srvlink); srvlink = NULL; link_closed = 0; } }
   pump_output ();
   if (now - last_tick >= 100) { last_tick = now; irc_conn_tick (conn, now); }
   Wimp_GetWindowState (win_main, &st);						/* the window may have been resized */
@@ -822,7 +973,7 @@ static BOOL null_handler (event_pollblock *event, void *reference)
 
 /* ---- creating the windows ---- */
 
-static window_handle make_window (int x0, int y0, int x1, int y1, unsigned flags, int back, int wx, int wy, const char *title, int minw, int minh)
+static window_handle make_window (int x0, int y0, int x1, int y1, unsigned flags, int back, int wx, int wy, const char *title, int minw, int minh, int wtype)
 {
   window_block wb;
   window_handle h = 0;
@@ -833,7 +984,7 @@ static window_handle make_window (int x0, int y0, int x1, int y1, unsigned flags
   wb.colours.cols.titlefore = 7; wb.colours.cols.titleback = 2; wb.colours.cols.workfore = 7; wb.colours.cols.workback = (unsigned char) back;
   wb.colours.cols.scrollouter = 3; wb.colours.cols.scrollinner = 1; wb.colours.cols.titlefocus = 12;
   wb.workarearect.min.x = 0; wb.workarearect.max.x = wx; wb.workarearect.max.y = 0; wb.workarearect.min.y = -wy;
-  wb.workflags.value = 3u << 12;						/* the button type of the work area: 3 = clicks are reported (0 would report none, and the windows have no icons to click) */
+  wb.workflags.value = (unsigned) wtype << 12;				/* the button type of the work area: 3 = clicks are reported (0 would report none), 5 = double clicks too */
   wb.spritearea = 1;
   wb.minsize.x = minw; wb.minsize.y = minh;				/* the Wimp opens a window at least this big: only the main window needs a real minimum */
   if (title && title == titlebuf)					/* indirected title text, so that Window_SetTitle works */
@@ -852,13 +1003,13 @@ static void make_windows (void)
 {
   wimp_point off, size;
   icon_createblock ic;
-  win_main = make_window (80, 120, 1480, 860, 0xBF000002u, 0, 1400, 600, titlebuf, MIN_W, 400);	/* vertical scroll bar, size box, title bar with indirected text; not redrawn by the Wimp */
+  win_main = make_window (80, 120, 1480, 860, 0xBF000002u, 0, 1400, 600, titlebuf, MIN_W, 400, 3);	/* vertical scroll bar, size box, title bar with indirected text; not redrawn by the Wimp */
   Pane2_AddMain (win_main);
   /* the panes: flags 0x90000000 is a window with a vertical scroll bar and nothing else, 0x80000000 one with nothing: neither can be moved */
-  win_left = make_window (80, 120, 80 + LEFT_W, 700, 0x90000000u | 0x20u, 1, LEFT_W, 600, "", 20, 20);
-  win_right = make_window (1100, 120, 1100 + RIGHT_W, 700, 0x90000000u | 0x20u, 1, RIGHT_W, 600, "", 20, 20);
-  win_topic = make_window (80, 800, 1400, 800 + TOP_H, 0x80000000u | 0x20u, 0, 4000, TOP_H, "", 20, 20);
-  win_input = make_window (80, 120, 1400, 120 + BOT_H, 0x80000000u | 0x20u | 0x10u, 1, 4000, BOT_H, "", 20, 20);	/* 0x10: the Wimp redraws it (it has only icons): a window that asks to be redrawn and is not gets asked for ever */
+  win_left = make_window (80, 120, 80 + LEFT_W, 700, 0x90000000u | 0x20u, 1, LEFT_W, 600, "", 20, 20, 3);
+  win_right = make_window (1100, 120, 1100 + RIGHT_W, 700, 0x90000000u | 0x20u, 1, RIGHT_W, 600, "", 20, 20, 5);
+  win_topic = make_window (80, 800, 1400, 800 + TOP_H, 0x80000000u | 0x20u, 0, 4000, TOP_H, "", 20, 20, 3);
+  win_input = make_window (80, 120, 1400, 120 + BOT_H, 0x80000000u | 0x20u | 0x10u, 1, 4000, BOT_H, "", 20, 20, 3);	/* 0x10: the Wimp redraws it (it has only icons): a window that asks to be redrawn and is not gets asked for ever */
   /* the first pane that is added is the one in front: the input line and the topic, then the lists, which stretch down to the bottom of the window behind the input line */
   off.x = 0; off.y = 0; size.x = 1400; size.y = BOT_H;
   Pane2_AddPane (win_main, win_input, &off, &size, pane2_FIXED | pane2_HRESIZE | pane2_HSTRETCH);
@@ -935,7 +1086,7 @@ int main (void)
   Event_Claim (event_REDRAW, win_topic, event_ANY, topic_redraw, NULL);
   Event_Claim (event_CLICK, win_left, event_ANY, left_click, NULL);
   Event_Claim (event_CLICK, win_main, event_ANY, focus_click, NULL);
-  Event_Claim (event_CLICK, win_right, event_ANY, focus_click, NULL);
+  Event_Claim (event_CLICK, win_right, event_ANY, right_click, NULL);
   Event_Claim (event_CLICK, win_topic, event_ANY, focus_click, NULL);
   Event_Claim (event_OPEN, win_left, event_ANY, Handler_OpenWindow, NULL);
   Event_Claim (event_OPEN, win_right, event_ANY, Handler_OpenWindow, NULL);
@@ -943,8 +1094,7 @@ int main (void)
   Event_Claim (event_OPEN, win_main, event_ANY, main_open_handler, NULL);
   Event_Claim (event_CLOSE, win_main, event_ANY, close_handler, NULL);
   Event_Claim (event_NULL, event_ANY, event_ANY, null_handler, NULL);
-  memset (&cfg, 0, sizeof cfg);
-  cfg.nick = "natter_user"; cfg.user = "natter"; cfg.realname = "Natter on RISC OS 64"; cfg.ctcp_version = "Natter 0.1 (RISC OS 64)";
+  cfg = make_config ();
   conn = irc_conn_new (&cfg, on_event, NULL);
   bufs[0] = buffer_new ("Status", BK_STATUS, 0); nbufs = 1; cur = 0;
   layout_width = 800;
