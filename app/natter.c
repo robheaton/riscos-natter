@@ -1102,7 +1102,7 @@ static void put_in_input (const char *text)
 
 static void build_menus (void)
 {
-  m_icon = Menu_New ("Natter", "Info,Networks,Open choices|Quit");
+  m_icon = Menu_New ("Natter", "Info,Networks,Choices folder,Logs folder|Quit");
   m_chan = Menu_New ("Conversation", "Join channel...,Part channel,Topic...|Log this conversation,Open log|Close conversation");
   m_nick = Menu_New ("Person", "Talk to,Who is|Give op,Take op,Give voice,Take voice|Kick,Ban|Insert in line");
 }
@@ -1152,6 +1152,7 @@ static void open_log_file (buffer *b)
   f = fopen (path, "r");
   if (!f) { status_line (LK_INFO, "There is no log of %s yet (%s)", b->name, path); return; }
   fclose (f);
+  status_line (LK_INFO, "Opening %s (if nothing opens, open a folder that holds your text editor first: the Filer must have seen it)", path);
   snprintf (cmd, sizeof cmd, "Filer_Run %s", path);
   Wimp_StartTask (cmd);
 }
@@ -1166,8 +1167,13 @@ static BOOL menu_handler (event_pollblock *event, void *reference)
 	{
 	case 0: status_line (LK_INFO, "Natter 0.1 for RISC OS 64: an IRC client. Logs: %s", logdir); break;
 	case 1: if (sel[1] >= 0 && sel[1] < cfg_set.nnets) connect_network (&cfg_set.nets[sel[1]]); break;
-	case 2: { FILE *f = fopen (CHOICES_READ, "r"); if (!f) save_settings (); else fclose (f); Wimp_StartTask ("Filer_Run " CHOICES_WRITE); } break;
-	case 3: quit_app (); break;
+	case 2:									/* the folder, not the file: Filer_Run of a text file fails until the Filer has seen a text editor */
+	  { FILE *f = fopen (CHOICES_WRITE, "r"); if (!f) save_settings (); else fclose (f); Wimp_StartTask ("Filer_OpenDir <Choices$Write>.Natter"); }
+	  break;
+	case 3:
+	  { char cmd[300]; mkdir ("<Choices$Write>.Natter", 0777); mkdir (logdir, 0777); snprintf (cmd, sizeof cmd, "Filer_OpenDir %s", logdir); Wimp_StartTask (cmd); }
+	  break;
+	case 4: quit_app (); break;
 	}
     }
   else if (shown == m_chan && menu_buf >= 0 && menu_buf < nbufs)
