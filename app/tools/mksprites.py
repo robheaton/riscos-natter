@@ -2,7 +2,6 @@
 """mksprites.py OUT_SPRITE_FILE [OUT_PREVIEW_PNG]: makes the sprite file of Natter (the icon of the application and of the icon bar): a speech bubble, in two forms:
    !natter     the bubble
    natterhl    the bubble with a red mark (for the icon bar when something mentions you)
-   natterbig   the bubble twice as big (for the information window)
 32 bits a pixel with a mask, 68 x 68 pixels at 180 dots an inch (so it is drawn 34 pixels wide in a mode of 90 dots an inch).  Drawn at 4 times the size and reduced: the mask is on or off,
 the colour at the edge is the colour of the bubble.  Only the standard library is needed (the preview PNG is written by hand)."""
 import struct, sys, zlib
@@ -95,9 +94,8 @@ def png(path, pix):
 
 def main():
     a, b = render(False), render(True)
-    big = render(False, 136)
-    blocks = sprite_block("!natter", a) + sprite_block("natterhl", b) + sprite_block("natterbig", big, 136)
-    area = struct.pack("<III", 3, 16, 16 + len(blocks)) + blocks
+    blocks = sprite_block("!natter", a) + sprite_block("natterhl", b)
+    area = struct.pack("<III", 2, 16, 16 + len(blocks)) + blocks
     open(sys.argv[1], "wb").write(area)
     if len(sys.argv) > 2:
         wide = [ra + rb for ra, rb in zip(a, b)]

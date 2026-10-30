@@ -11,7 +11,6 @@
 #include "DeskLib:Icon.h"
 #include "DeskLib:Menu.h"
 #include "DeskLib:Error.h"
-#include <openssl/opensslv.h>
 #include "choices.h"
 
 /* the icons: flags that are known to work (see the dialogue test of DeskLib64) */
@@ -309,21 +308,29 @@ void choices_show (const settings *s, int select)
   Icon_SetCaret (win, i_nick);
 }
 
-/* ---- the program information window: the standard box that comes out of the first item of the icon bar menu ---- */
+/* ---- the program information window: the standard box that comes out of the first item of the icon bar menu (a title, and four rows: a label and a display field) ---- */
 
 window_handle info_window_create (void)
 {
-  static char title[] = "Program information";
-  static char t_name[] = "Natter", l_purpose[] = "Purpose", t_purpose[] = "An IRC client for RISC OS 64", l_author[] = "Author", t_author[] = "Rob Heaton";
-  static char l_version[] = "Version", t_version[] = "0.1 (" __DATE__ ")", t_ssl[] = "Uses OpenSSL " OPENSSL_VERSION_STR " (Apache Licence 2.0)", t_sprite[] = "natterbig";
+  static char title[] = "About this program";
+  static char l_name[] = "Name", t_name[] = "Natter", l_purpose[] = "Purpose", t_purpose[] = "An IRC client for RISC OS 64", l_author[] = "Author", t_author[] = "\xA9 Rob Heaton 2026";
+  static char l_version[] = "Version", t_version[48], v_field[] = "R2";
+  static const char *months[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
   window_block wb;
   window_handle w = 0, keep = win;
-  icon_createblock ic;
-  const int width = 640, height = 300;
+  const int width = 520, height = 20 + 4 * 52 + 12;
+  const unsigned f_label = 0x07000311u;							/* text, vertically centred, right justified, indirected */
+  const unsigned f_display = (7u << 24) | (2u << 28) | 0x1u | 0x4u | 0x8u | 0x10u | 0x20u | 0x100u;	/* text, border, centred, filled (grey), indirected: not writable */
+  char mon[8] = "";
+  int day = 0, year = 0, k;
+  size_t r;
+  if (sscanf (__DATE__, "%7s %d %d", mon, &day, &year) == 3)				/* "Oct 30 2026" -> "30 Oct 2026" */
+    { for (k = 0; k < 12; k++) if (!strncmp (mon, months[k], 3)) break; snprintf (t_version, sizeof t_version, "0.1 (%d %s %d)", day, k < 12 ? months[k] : mon, year); }
+  else snprintf (t_version, sizeof t_version, "0.1");
   memset (&wb, 0, sizeof wb);
   wb.screenrect.min.x = 300; wb.screenrect.min.y = 300; wb.screenrect.max.x = 300 + width; wb.screenrect.max.y = 300 + height;
   wb.behind = -1;
-  wb.flags.value = 0x84000010u;						/* a title bar; the Wimp redraws it */
+  wb.flags.value = 0x84000010u;								/* a title bar; the Wimp redraws it */
   wb.colours.cols.titlefore = 7; wb.colours.cols.titleback = 2; wb.colours.cols.workfore = 7; wb.colours.cols.workback = 1;
   wb.colours.cols.scrollouter = 3; wb.colours.cols.scrollinner = 1; wb.colours.cols.titlefocus = 12;
   wb.workarearect.min.x = 0; wb.workarearect.max.x = width; wb.workarearect.max.y = 0; wb.workarearect.min.y = -height;
@@ -332,18 +339,16 @@ window_handle info_window_create (void)
   wb.spritearea = 1;
   wb.minsize.x = 100; wb.minsize.y = 100;
   Wimp_CreateWindow (&wb, &w);
-  win = w;									/* mk () makes its icons in win */
-  memset (&ic, 0, sizeof ic);
-  ic.window = w;
-  ic.icondata.workarearect.min.x = 24; ic.icondata.workarearect.min.y = -170; ic.icondata.workarearect.max.x = 160; ic.icondata.workarearect.max.y = -34;
-  ic.icondata.flags.value = (7u << 24) | 0x2u | 0x8u | 0x10u | 0x100u;		/* a sprite, centred, indirected */
-  ic.icondata.data.indirectsprite.name = DL_PTR (t_sprite); ic.icondata.data.indirectsprite.spritearea = (dl_ptr) 1; ic.icondata.data.indirectsprite.nameisname = sizeof t_sprite;
-  { icon_handle h; Wimp_CreateIcon (&ic, &h); }
-  mk (190, -74, width - 20, -30, F_LABEL, t_name, sizeof t_name, NULL);
-  mk (190, -126, 300, -86, F_LABEL, l_purpose, sizeof l_purpose, NULL); mk (310, -126, width - 20, -86, F_LABEL, t_purpose, sizeof t_purpose, NULL);
-  mk (190, -172, 300, -132, F_LABEL, l_author, sizeof l_author, NULL); mk (310, -172, width - 20, -132, F_LABEL, t_author, sizeof t_author, NULL);
-  mk (190, -218, 300, -178, F_LABEL, l_version, sizeof l_version, NULL); mk (310, -218, width - 20, -178, F_LABEL, t_version, sizeof t_version, NULL);
-  mk (24, -276, width - 20, -236, F_LABEL, t_ssl, sizeof t_ssl, NULL);
+  win = w;											/* mk () makes its icons in win */
+  for (r = 0; r < 4; r++)
+    {
+      static char *labels[4], *values[4];
+      int top = -(20 + (int) r * 52);
+      labels[0] = l_name; labels[1] = l_purpose; labels[2] = l_author; labels[3] = l_version;
+      values[0] = t_name; values[1] = t_purpose; values[2] = t_author; values[3] = t_version;
+      mk (16, top - 44, 116, top, f_label, labels[r], strlen (labels[r]) + 1, NULL);
+      mk (128, top - 44, width - 16, top, f_display, values[r], r == 3 ? sizeof t_version : strlen (values[r]) + 1, v_field);
+    }
   win = keep;
   return w;
 }
