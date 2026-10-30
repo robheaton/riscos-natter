@@ -37,6 +37,8 @@ typedef struct buffer
   int new_marker;		/* the line before which the "new messages" mark is drawn (n = none); set when the buffer is left */
   char *topic;
   int scroll_row;		/* the first row that is shown, or -1 to follow the bottom */
+  int log;			/* write the lines to a log file: -1 as the choices say, 0 no, 1 yes */
+  int joined;			/* a channel that we are in (set and cleared by the application, used to join again after a reconnect) */
 } buffer;
 
 #define NICK_COLOURS 8

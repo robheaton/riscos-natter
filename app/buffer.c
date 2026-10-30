@@ -67,6 +67,7 @@ buffer *buffer_new (const char *name, int kind, int network)
   b->max_lines = 5000; b->drop_lines = 500;
   b->rowbase = xrealloc (NULL, sizeof *b->rowbase); b->rowbase[0] = 0;
   b->scroll_row = -1;
+  b->log = -1;
   return b;
 }
 

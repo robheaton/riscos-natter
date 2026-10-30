@@ -22,6 +22,7 @@
 #include "DeskLib:SWI.h"
 #include "DeskLib:Time.h"
 #include "DeskLib:Pane2.h"
+#include "DeskLib:Menu.h"
 #include "DeskLib:Screen.h"
 #include "DeskLib:Error.h"
 #include "irc.h"
@@ -29,6 +30,7 @@
 #include "demo.h"
 #include "net.h"
 #include "settings.h"
+#include "logfile.h"
 
 /* ---- the geometry, in OS units ---- */
 #define LH 36				/* a row of the scrollback */
@@ -80,6 +82,11 @@ static FILE *logf;
 static net *srvlink;				/* the connection to a real server; NULL while the demonstration is the server */
 static int demo_active = 1;
 static int link_closed;				/* the net reported the end of the connection: it is freed by the idle loop */
+static int want_connected;			/* the user wants to be connected: after a failure the connection is made again */
+static unsigned reconnect_at, backoff_cs = 500;	/* when to try again (0: not waiting), and how long the next wait is: 5 s, doubling to 5 minutes */
+static char rejoin[1024];			/* the channels that we were in when the connection ended */
+static logger *lg;				/* the log files */
+static char logdir[220];
 static settings cfg_set;			/* the choices, from the file */
 static netsettings cur_net;			/* the network that is in use (a copy: /connect host makes one that is not in the file) */
 #define CHOICES_READ "Choices:Natter.Choices"
@@ -238,6 +245,7 @@ static void scroll_main_to_bottom (void)
   window_state st;
   int vis;
   Wimp_GetWindowState (win_main, &st);
+  if (!st.flags.data.open) return;						/* the window is hidden: opening it here would show it without its panes */
   vis = st.openblock.screenrect.max.y - st.openblock.screenrect.min.y;
   st.openblock.scroll.y = total_height (bufs[cur]) > vis ? vis - total_height (bufs[cur]) : 0;
   Wimp_OpenWindow (&st.openblock);
@@ -337,6 +345,13 @@ static void select_buffer (int i)
   log_sync ();
 }
 
+static int log_enabled (const buffer *b)
+{
+  if (b->log >= 0) return b->log;
+  if (cur_net.log >= 0) return cur_net.log;
+  return cfg_set.log;
+}
+
 /* a line for a buffer */
 static void add_line (buffer *b, long when, int kind, const char *nick, const char *text, int self, int highlight)
 {
@@ -344,6 +359,12 @@ static void add_line (buffer *b, long when, int kind, const char *nick, const ch
   int shown = (buffer_index (b) == cur);
   int follow = shown && main_at_bottom ();
   buffer_add (b, when, kind, nick, text, colour, highlight, self, measure_cb, NULL);
+  if (lg && !demo_active && log_enabled (b))
+    {
+      char t[1300];
+      log_format (t, sizeof t, when, tz_offset, kind, nick, text);
+      logger_add (lg, cur_net.name[0] ? cur_net.name : "Natter", b->kind, b->name, t);
+    }
   if (shown)
     {
       set_main_extent ();
@@ -365,6 +386,29 @@ static void status_line (int kind, const char *fmt, ...)
   va_start (ap, fmt); vsnprintf (t, sizeof t, fmt, ap); va_end (ap);
   add_line (bufs[0], (long) time (NULL), kind, NULL, t, 0, 0);
 }
+
+/* JOIN for a list of channels separated by commas, in lines that are not too long */
+static void join_list (const char *list)
+{
+  char chunk[400];
+  size_t n = 0;
+  const char *p = list;
+  while (*p)
+    {
+      size_t l = strcspn (p, ",");
+      if (l && l < 200)
+	{
+	  if (n && n + 1 + l > sizeof chunk - 1) { chunk[n] = 0; irc_join (conn, chunk, NULL); n = 0; }
+	  if (n) chunk[n++] = ',';
+	  memcpy (chunk + n, p, l); n += l;
+	}
+      p += l;
+      if (*p == ',') p++;
+    }
+  if (n) { chunk[n] = 0; irc_join (conn, chunk, NULL); }
+}
+
+static void schedule_reconnect (void);
 
 /* ---- the events of the core ---- */
 
@@ -391,8 +435,10 @@ static void on_event (void *ud, const irc_event *e)
       snprintf (nicklabel, sizeof nicklabel, "%s", own);
       Icon_SetText (win_input, ic_nick, nicklabel);
       set_title ();
+      backoff_cs = 500;
       if (demo_active) { irc_join (conn, "#riscos64", NULL); irc_join (conn, "#riscosdev", NULL); }
-      else if (cur_net.autojoin[0]) irc_join (conn, cur_net.autojoin, NULL);
+      else if (rejoin[0]) { join_list (rejoin); rejoin[0] = 0; }
+      else if (cur_net.autojoin[0]) join_list (cur_net.autojoin);
       break;
     case IRC_EV_PRIVMSG: case IRC_EV_NOTICE: case IRC_EV_ACTION:
       {
@@ -413,6 +459,7 @@ static void on_event (void *ud, const irc_event *e)
       if (e->self)
 	{
 	  buffer *b = get_buffer (e->target, BK_CHANNEL);
+	  b->joined = 1;
 	  add_line (b, when, LK_JOIN, NULL, "You have joined the channel", 1, 0);
 	  if (cur == 0) select_buffer (buffer_index (b));
 	}
@@ -420,6 +467,7 @@ static void on_event (void *ud, const irc_event *e)
       nicks_dirty = 1;
       break;
     case IRC_EV_PART:
+      if (e->self && e->target) { buffer *pb = find_buffer (e->target); if (pb) pb->joined = 0; }
       chan_line (e, when, LK_PART, "%s has left%s%s", e->self ? "You" : e->from, e->text && *e->text ? ": " : "", e->text ? e->text : "");
       nicks_dirty = 1;
       break;
@@ -433,6 +481,7 @@ static void on_event (void *ud, const irc_event *e)
       nicks_dirty = 1;
       break;
     case IRC_EV_KICK:
+      if (e->self && e->target) { buffer *kb = find_buffer (e->target); if (kb) kb->joined = 0; }
       chan_line (e, when, LK_PART, "%s was kicked by %s%s%s", e->self ? "You" : e->arg, e->from, e->text && *e->text ? ": " : "", e->text ? e->text : "");
       nicks_dirty = 1;
       break;
@@ -457,7 +506,10 @@ static void on_event (void *ud, const irc_event *e)
     case IRC_EV_SASL_OK: status_line (LK_INFO, "Logged in"); break;
     case IRC_EV_SASL_FAIL: status_line (LK_ERROR, "The login failed: %s", e->text); break;
     case IRC_EV_ERROR: status_line (LK_ERROR, "The server closed the connection: %s", e->text); break;
-    case IRC_EV_TIMEOUT: status_line (LK_ERROR, "No answer from the server for a long time"); break;
+    case IRC_EV_TIMEOUT:
+      status_line (LK_ERROR, "No answer from the server for a long time");
+      if (srvlink) { link_closed = 1; if (want_connected) schedule_reconnect (); }
+      break;
     case IRC_EV_NUMERIC:
       status_line (e->numeric >= 400 && e->numeric < 600 ? LK_ERROR : LK_INFO, "%s", e->text);
       break;
@@ -523,6 +575,31 @@ static void net_closed_cb (void *ud, const char *why)
   (void) ud;
   status_line (LK_ERROR, "%s", why);
   link_closed = 1;
+  if (!want_connected) return;
+  if (!strncmp (why, "the certificate", 15)) { want_connected = 0; status_line (LK_ERROR, "Not trying again: check the server name and port in your choices, and that your connection is not being intercepted"); }
+  else schedule_reconnect ();
+}
+
+/* the channels that we are in, and a line in each of them that says that the connection is gone */
+static void schedule_reconnect (void)
+{
+  char list[sizeof rejoin];
+  int i;
+  size_t n = 0;
+  list[0] = 0;
+  for (i = 1; i < nbufs; i++)
+    if (bufs[i]->kind == BK_CHANNEL && bufs[i]->joined)
+      {
+	size_t l = strlen (bufs[i]->name);
+	if (n + l + 2 < sizeof list) { if (n) list[n++] = ','; memcpy (list + n, bufs[i]->name, l); n += l; list[n] = 0; }
+	add_line (bufs[i], (long) time (NULL), LK_ERROR, NULL, "The connection to the server has ended", 0, 0);
+	bufs[i]->joined = 0;
+      }
+  if (list[0]) snprintf (rejoin, sizeof rejoin, "%s", list);			/* a later failed attempt must not forget them */
+  reconnect_at = Time_Monotonic () + backoff_cs;
+  if (!reconnect_at) reconnect_at = 1;
+  status_line (LK_INFO, "Trying again in %u seconds", backoff_cs / 100);
+  backoff_cs = backoff_cs * 2 > 30000 ? 30000 : backoff_cs * 2;
 }
 
 static irc_config make_config (void)
@@ -538,10 +615,16 @@ static irc_config make_config (void)
   return cfg;
 }
 
-static void drop_link (void)
+static void stop_link (void)			/* the connection goes; whether it should come back is another matter */
 {
   if (srvlink) { if (net_connected (srvlink)) { irc_quit (conn, "Natter"); pump_output (); } net_free (srvlink); srvlink = NULL; }
   link_closed = 0;
+}
+
+static void drop_link (void)			/* the user ends the connection: nothing is tried again */
+{
+  want_connected = 0; reconnect_at = 0; rejoin[0] = 0; backoff_cs = 500;
+  stop_link ();
 }
 
 /* forget the conversations of the demonstration or of the last server: only the status buffer stays */
@@ -557,13 +640,14 @@ static void clear_buffers (void)
   refresh_lists ();
 }
 
-static void connect_network (const netsettings *n)
+static void connect_network_ex (const netsettings *n, int keep)
 {
   static const net_events evs = { net_status_cb, net_connected_cb, net_data_cb, net_closed_cb };
   irc_config cfg;
-  drop_link ();
+  stop_link ();
   demo_active = 0;
-  clear_buffers ();
+  if (!keep) clear_buffers ();
+  want_connected = 1; reconnect_at = 0;
   cur_net = *n;
   irc_conn_free (conn);
   cfg = make_config ();
@@ -573,6 +657,12 @@ static void connect_network (const netsettings *n)
   status_line (LK_INFO, "Connecting to %s (%s port %d%s)", n->name, n->host, net_port (n), n->tls ? " with TLS" : ", not encrypted");
   srvlink = net_open (n->host, net_port (n), n->tls, CA_FILE, 1, &evs, NULL);
   if (!srvlink) link_closed = 0;					/* net_open has reported the failure */
+}
+
+static void connect_network (const netsettings *n)
+{
+  rejoin[0] = 0; backoff_cs = 500;
+  connect_network_ex (n, 0);
 }
 
 static void save_settings (void)
@@ -662,6 +752,16 @@ static void run_command (char *line)
 	}
     }
   else if (!strcasecmp (cmd, "save")) save_settings ();
+  else if (!strcasecmp (cmd, "log"))
+    {
+      char path[400];
+      if (!strcasecmp (arg, "on") || !strcasecmp (arg, "off")) { b->log = !strcasecmp (arg, "on"); }
+      else if (!strcasecmp (arg, "all on") || !strcasecmp (arg, "all off")) { cfg_set.log = !strcasecmp (arg, "all on"); status_line (LK_INFO, "Logging is %s for everything that has no setting of its own (/save keeps this)", cfg_set.log ? "on" : "off"); }
+      else if (*arg) { status_line (LK_ERROR, "Usage: /log (shows), /log on, /log off (this conversation), /log all on, /log all off"); goto logdone; }
+      logger_path (lg, cur_net.name[0] ? cur_net.name : "Natter", b->kind, b->name, path, sizeof path);
+      status_line (LK_INFO, "Logging of %s is %s%s%s", b->name, log_enabled (b) ? "on" : "off", log_enabled (b) ? ": " : "", log_enabled (b) ? path : "");
+    logdone: ;
+    }
   else if (!strcasecmp (cmd, "disconnect")) { if (srvlink) { drop_link (); status_line (LK_INFO, "Disconnected"); } else status_line (LK_INFO, "Not connected"); }
   else if (!strcasecmp (cmd, "demo")) go_demo ();
   else if (!strcasecmp (cmd, "msg") || !strcasecmp (cmd, "query") || !strcasecmp (cmd, "q"))
@@ -671,9 +771,35 @@ static void run_command (char *line)
       if (*arg) { buffer *q = get_buffer (arg, BK_QUERY); select_buffer (buffer_index (q)); if (text && *text) irc_say (conn, arg, text); }
     }
   else if (!strcasecmp (cmd, "topic")) { if (b->kind == BK_CHANNEL) irc_set_topic (conn, b->name, *arg ? arg : NULL); }
-  else if (!strcasecmp (cmd, "quit")) { irc_quit (conn, *arg ? arg : "Natter"); }
+  else if (!strcasecmp (cmd, "whois")) { if (*arg) { char l[200]; snprintf (l, sizeof l, "WHOIS %s", arg); irc_send_raw (conn, l); } else status_line (LK_ERROR, "Usage: /whois nick"); }
+  else if (!strcasecmp (cmd, "mode")) { char l[400]; snprintf (l, sizeof l, "MODE %s%s%s", *arg && !strchr ("#&+!", arg[0]) && b->kind == BK_CHANNEL ? b->name : "", *arg && !strchr ("#&+!", arg[0]) && b->kind == BK_CHANNEL ? " " : "", arg); if (*arg) irc_send_raw (conn, l); }
+  else if (b->kind == BK_CHANNEL && (!strcasecmp (cmd, "op") || !strcasecmp (cmd, "deop") || !strcasecmp (cmd, "voice") || !strcasecmp (cmd, "devoice")))
+    {
+      char l[300];
+      if (!*arg) status_line (LK_ERROR, "Usage: /%s nick", cmd);
+      else { snprintf (l, sizeof l, "MODE %s %c%c %s", b->name, !strncasecmp (cmd, "de", 2) ? '-' : '+', strstr (cmd, "voice") ? 'v' : 'o', arg); irc_send_raw (conn, l); }
+    }
+  else if (b->kind == BK_CHANNEL && !strcasecmp (cmd, "kick"))
+    {
+      char l[500], *why = strchr (arg, ' ');
+      if (why) *why++ = 0;
+      if (!*arg) status_line (LK_ERROR, "Usage: /kick nick [reason]");
+      else { snprintf (l, sizeof l, "KICK %s %s :%s", b->name, arg, why && *why ? why : arg); irc_send_raw (conn, l); }
+    }
+  else if (b->kind == BK_CHANNEL && !strcasecmp (cmd, "ban"))
+    {
+      char l[300];
+      const irc_user *u = *arg ? irc_conn_user (conn, arg) : NULL;
+      if (!*arg) status_line (LK_ERROR, "Usage: /ban nick");
+      else
+	{
+	  if (u && u->host) snprintf (l, sizeof l, "MODE %s +b *!*@%s", b->name, u->host); else snprintf (l, sizeof l, "MODE %s +b %s!*@*", b->name, arg);
+	  irc_send_raw (conn, l);
+	}
+    }
+  else if (!strcasecmp (cmd, "quit")) { want_connected = 0; reconnect_at = 0; irc_quit (conn, *arg ? arg : "Natter"); }
   else if (!strcasecmp (cmd, "raw") || !strcasecmp (cmd, "quote")) irc_send_raw (conn, arg);
-  else if (!strcasecmp (cmd, "help")) status_line (LK_INFO, "Commands: /connect NAME or host [port] [notls], /networks, /savenet NAME, /autojoin #a,#b, /disconnect, /demo, /join, /part, /me, /nick, /msg, /query, /topic, /quit, /raw");
+  else if (!strcasecmp (cmd, "help")) status_line (LK_INFO, "Commands: /connect NAME or host [port] [notls], /networks, /savenet NAME, /autojoin #a,#b, /log on|off, /disconnect, /demo, /join, /part, /me, /nick, /msg, /query, /topic, /whois, /op /deop /voice /devoice, /kick, /ban, /mode, /quit, /raw");
   else status_line (LK_ERROR, "Unknown command: /%s (try /help)", cmd);
 }
 
@@ -911,6 +1037,138 @@ static BOOL topic_redraw (event_pollblock *event, void *reference)
   return TRUE;
 }
 
+/* ---- menus ---- */
+
+static menu_ptr m_icon, m_chan, m_nick, m_nets;
+static menu_ptr shown;					/* the menu that is open */
+static int menu_buf = -1;				/* the conversation that a channel menu is about */
+static char menu_nick[64];				/* the person that a nick menu is about */
+static icon_handle bar_icon = -1;
+static int have_icon;
+static void quit_app (void);
+
+static void close_buffer (int i)
+{
+  buffer *b;
+  int k;
+  if (i <= 0 || i >= nbufs) return;
+  b = bufs[i];
+  if (b->kind == BK_CHANNEL && b->joined) irc_part (conn, b->name, NULL);
+  buffer_free (b);
+  for (k = i; k < nbufs - 1; k++) bufs[k] = bufs[k + 1];
+  nbufs--;
+  if (cur == i) cur = i - 1; else if (cur > i) cur--;
+  select_buffer (cur);
+}
+
+static void put_in_input (const char *text)
+{
+  Icon_SetText (win_input, ic_input, text);
+  Icon_SetCaret (win_input, ic_input);
+}
+
+static void build_menus (void)
+{
+  m_icon = Menu_New ("Natter", "Info,Networks,Open choices|Quit");
+  m_chan = Menu_New ("Conversation", "Join channel...,Part channel,Topic...|Log this conversation,Open log|Close conversation");
+  m_nick = Menu_New ("Person", "Talk to,Who is|Give op,Take op,Give voice,Take voice|Kick,Ban|Insert in line");
+}
+
+static void show_icon_menu (int x)
+{
+  char desc[1200];
+  int i;
+  size_t n = 0;
+  desc[0] = 0;
+  for (i = 0; i < cfg_set.nnets && n < 1000; i++) n += (size_t) snprintf (desc + n, sizeof desc - n, "%s%s", i ? "," : "", cfg_set.nets[i].name);
+  if (!cfg_set.nnets) snprintf (desc, sizeof desc, "~No networks");
+  { menu_ptr fresh = Menu_New ("Connect to", desc); Menu_AddSubMenu (m_icon, 1, fresh); if (m_nets) Menu_FullDispose (m_nets); m_nets = fresh; }
+  shown = m_icon;
+  Menu_Show (m_icon, x - 64, -1);
+}
+
+static void show_chan_menu (int bufidx, int x, int y)
+{
+  buffer *b = bufs[bufidx];
+  int chan = b->kind == BK_CHANNEL;
+  menu_buf = bufidx;
+  Menu_SetFlags (m_chan, 0, 0, 0);
+  Menu_SetFlags (m_chan, 1, 0, chan ? 0 : 1);
+  Menu_SetFlags (m_chan, 2, 0, chan ? 0 : 1);
+  Menu_SetFlags (m_chan, 3, log_enabled (b), 0);
+  Menu_SetFlags (m_chan, 5, 0, bufidx == 0 ? 1 : 0);
+  shown = m_chan;
+  Menu_Show (m_chan, x - 64, y);
+}
+
+static void show_nick_menu (const char *nick, int x, int y)
+{
+  int self = !irc_conn_casecmp (conn, nick, irc_conn_nick (conn));
+  snprintf (menu_nick, sizeof menu_nick, "%s", nick);
+  Menu_SetFlags (m_nick, 0, 0, self);
+  shown = m_nick;
+  Menu_Show (m_nick, x - 64, y);
+}
+
+static void open_log_file (buffer *b)
+{
+  char path[400], cmd[460];
+  FILE *f;
+  logger_flush (lg);
+  logger_path (lg, cur_net.name[0] ? cur_net.name : "Natter", b->kind, b->name, path, sizeof path);
+  f = fopen (path, "r");
+  if (!f) { status_line (LK_INFO, "There is no log of %s yet (%s)", b->name, path); return; }
+  fclose (f);
+  snprintf (cmd, sizeof cmd, "Filer_Run %s", path);
+  Wimp_StartTask (cmd);
+}
+
+static BOOL menu_handler (event_pollblock *event, void *reference)
+{
+  int *sel = event->data.selection;
+  (void) reference;
+  if (shown == m_icon)
+    {
+      switch (sel[0])
+	{
+	case 0: status_line (LK_INFO, "Natter 0.1 for RISC OS 64: an IRC client. Logs: %s", logdir); break;
+	case 1: if (sel[1] >= 0 && sel[1] < cfg_set.nnets) connect_network (&cfg_set.nets[sel[1]]); break;
+	case 2: { FILE *f = fopen (CHOICES_READ, "r"); if (!f) save_settings (); else fclose (f); Wimp_StartTask ("Filer_Run " CHOICES_WRITE); } break;
+	case 3: quit_app (); break;
+	}
+    }
+  else if (shown == m_chan && menu_buf >= 0 && menu_buf < nbufs)
+    {
+      buffer *b = bufs[menu_buf];
+      switch (sel[0])
+	{
+	case 0: put_in_input ("/join #"); break;
+	case 1: if (b->kind == BK_CHANNEL) irc_part (conn, b->name, NULL); break;
+	case 2: { char t[400]; snprintf (t, sizeof t, "/topic %s", b->topic ? b->topic : ""); put_in_input (t); } break;
+	case 3: b->log = !log_enabled (b); status_line (LK_INFO, "Logging of %s is %s", b->name, b->log ? "on" : "off"); break;
+	case 4: open_log_file (b); break;
+	case 5: close_buffer (menu_buf); break;
+	}
+    }
+  else if (shown == m_nick && menu_nick[0])
+    {
+      char t[200];
+      switch (sel[0])
+	{
+	case 0: select_buffer (buffer_index (get_buffer (menu_nick, BK_QUERY))); break;
+	case 1: snprintf (t, sizeof t, "WHOIS %s", menu_nick); irc_send_raw (conn, t); break;
+	case 2: case 3: case 4: case 5:
+	  if (bufs[cur]->kind == BK_CHANNEL) { snprintf (t, sizeof t, "MODE %s %c%c %s", bufs[cur]->name, sel[0] % 2 ? '-' : '+', sel[0] < 4 ? 'o' : 'v', menu_nick); irc_send_raw (conn, t); }
+	  break;
+	case 6: snprintf (t, sizeof t, "/kick %s ", menu_nick); put_in_input (t); break;
+	case 7: snprintf (t, sizeof t, "/ban %s", menu_nick); put_in_input (t); break;
+	case 8: { char line[512]; Icon_GetText (win_input, ic_input, line); strncat (line, menu_nick, sizeof line - strlen (line) - 2); strcat (line, " "); put_in_input (line); } break;
+	}
+    }
+  pump_output ();
+  return TRUE;
+}
+
 /* ---- the mouse ---- */
 
 static BOOL left_click (event_pollblock *event, void *reference)
@@ -920,8 +1178,7 @@ static BOOL left_click (event_pollblock *event, void *reference)
   (void) reference;
   Wimp_GetWindowState (win_left, &st);
   row = ((st.openblock.screenrect.max.y - st.openblock.scroll.y) - event->data.mouse.pos.y - 4) / LISTLH;
-  LOG ("click in the buffer list: button %d, pos %d,%d, window top %d scroll %d, row %d of %d", (int) event->data.mouse.button.value, event->data.mouse.pos.x, event->data.mouse.pos.y, st.openblock.screenrect.max.y, st.openblock.scroll.y, row, nbufs);
-  log_sync ();
+  if (event->data.mouse.button.data.menu) { if (row >= 0 && row < nbufs) show_chan_menu (row, event->data.mouse.pos.x, event->data.mouse.pos.y); return TRUE; }
   if (row >= 0 && row < nbufs && event->data.mouse.pos.y > 0) select_buffer (row);
   Icon_SetCaret (win_input, ic_input);
   return TRUE;
@@ -935,7 +1192,11 @@ static BOOL right_click (event_pollblock *event, void *reference)
   (void) reference;
   Wimp_GetWindowState (win_right, &st);
   row = ((st.openblock.screenrect.max.y - st.openblock.scroll.y) - event->data.mouse.pos.y - 4) / LISTLH - 1;	/* the first row is the number of users */
-  LOG ("click in the nick list: button %d, row %d of %d", (int) event->data.mouse.button.value, row, (int) nnicks);
+  if (event->data.mouse.button.data.menu)
+    {
+      if (row >= 0 && (size_t) row < nnicks) show_nick_menu (nicks[row].user->nick, event->data.mouse.pos.x, event->data.mouse.pos.y);
+      return TRUE;
+    }
   if (event->data.mouse.button.data.select && row >= 0 && (size_t) row < nnicks && event->data.mouse.pos.y > 0)
     {
       const char *nk = nicks[row].user->nick;
@@ -948,8 +1209,7 @@ static BOOL right_click (event_pollblock *event, void *reference)
 static BOOL focus_click (event_pollblock *event, void *reference)
 {
   (void) reference;
-  LOG ("click in window %x: button %d", (unsigned) event->data.mouse.window, (int) event->data.mouse.button.value);
-  log_sync ();
+  if (event->data.mouse.button.data.menu && event->data.mouse.window == win_main) { show_chan_menu (cur, event->data.mouse.pos.x, event->data.mouse.pos.y); return TRUE; }
   Icon_SetCaret (win_input, ic_input);
   return TRUE;
 }
@@ -973,12 +1233,28 @@ static BOOL main_open_handler (event_pollblock *event, void *reference)
   return TRUE;
 }
 
+static void quit_app (void)
+{
+  drop_link ();
+  logger_free (lg); lg = NULL;
+  Event_CloseDown ();
+  exit (0);
+}
+
 static BOOL close_handler (event_pollblock *event, void *reference)
 {
   (void) event; (void) reference;
-  drop_link ();
-  Event_CloseDown ();
-  exit (0);
+  if (have_icon) { Pane2_Hide (win_main); return TRUE; }		/* the icon on the icon bar brings the window back; Quit in its menu ends Natter */
+  quit_app ();
+  return TRUE;
+}
+
+static BOOL icon_click (event_pollblock *event, void *reference)
+{
+  (void) reference;
+  if (event->data.mouse.button.data.menu) { show_icon_menu (event->data.mouse.pos.x); return TRUE; }
+  Pane2_Show (win_main, open_WHEREVER);
+  Icon_SetCaret (win_input, ic_input);
   return TRUE;
 }
 
@@ -992,8 +1268,15 @@ static BOOL null_handler (event_pollblock *event, void *reference)
   (void) event; (void) reference;
   if (demo_active) demo_tick (now);
   if (srvlink) { net_poll (srvlink); if (link_closed) { net_free (srvlink); srvlink = NULL; link_closed = 0; } }
+  if (reconnect_at && !srvlink && (int) (now - reconnect_at) >= 0)
+    {
+      reconnect_at = 0;
+      status_line (LK_INFO, "Connecting again to %s", cur_net.name);
+      connect_network_ex (&cur_net, 1);
+    }
   pump_output ();
   if (now - last_tick >= 100) { last_tick = now; irc_conn_tick (conn, now); }
+  { static unsigned last_flush; if (lg && now - last_flush >= 300) { last_flush = now; logger_flush (lg); } }
   Wimp_GetWindowState (win_main, &st);						/* the window may have been resized */
   {
     int w = st.openblock.screenrect.max.x - st.openblock.screenrect.min.x;
@@ -1137,9 +1420,16 @@ int main (void)
   Event_Claim (event_OPEN, win_right, event_ANY, Handler_OpenWindow, NULL);
   Event_Claim (event_KEY, win_input, event_ANY, key_handler, NULL);
   Event_Claim (event_OPEN, win_main, event_ANY, main_open_handler, NULL);
+  Event_Claim (event_MENU, event_ANY, event_ANY, menu_handler, NULL);
   Event_Claim (event_CLOSE, win_main, event_ANY, close_handler, NULL);
   Event_Claim (event_NULL, event_ANY, event_ANY, null_handler, NULL);
+  build_menus ();
+  bar_icon = Icon_BarIcon ("file_fff", iconbar_RIGHT);					/* a stock sprite until Natter has its own */
+  if (bar_icon >= 0) { have_icon = 1; Event_Claim (event_CLICK, window_ICONBAR, bar_icon, icon_click, NULL); }
+  LOG ("icon bar icon %d", (int) bar_icon);
   settings_load (&cfg_set, CHOICES_READ);
+  snprintf (logdir, sizeof logdir, "%s", cfg_set.logdir[0] ? cfg_set.logdir : "<Choices$Write>.Natter.Logs");
+  lg = logger_new (logdir, ".");
   if (cfg_set.nnets == 0)								/* no choices yet: a first network to start from */
     {
       netsettings *n = settings_add (&cfg_set, "Libera.Chat");
@@ -1157,6 +1447,7 @@ int main (void)
   set_title ();
   demo_active = 0;
   status_line (LK_INFO, "Natter 0.1 for RISC OS 64. /help lists the commands; /networks the networks of your choices; /connect NAME connects; /demo shows a made-up conversation.");
+  status_line (LK_INFO, cfg_set.log ? "Conversations are logged in %s (/log off stops it for one, /log all off for all)" : "Logging is off (/log on turns it on for one conversation, /log all on for all)", logdir);
   {
     int k, started = 0;
     for (k = 0; k < cfg_set.nnets && !started; k++) if (cfg_set.nets[k].autoconnect) { connect_network (&cfg_set.nets[k]); started = 1; }
