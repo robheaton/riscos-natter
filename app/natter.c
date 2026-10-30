@@ -423,6 +423,80 @@ static void chan_line (const irc_event *e, long when, int kind, const char *fmt,
   add_line (b, when, kind, e->from, t, e->self, 0);
 }
 
+/* ---- WHOIS: the answer is a handful of numerics; they are shown, in words, in the conversation where the question was asked ---- */
+
+static char whois_where[64];			/* the conversation of the last WHOIS ("" = the status buffer) */
+static unsigned whois_at;			/* when it was asked (centiseconds) */
+static int whois_asked;				/* the answer has not ended yet (318) */
+
+static buffer *whois_buffer (void)
+{
+  buffer *b = NULL;
+  if (whois_asked && (int) (Time_Monotonic () - whois_at) < 3000 && whois_where[0]) b = find_buffer (whois_where);
+  return b ? b : bufs[0];
+}
+
+static void request_whois (const char *nick)
+{
+  char l[200];
+  snprintf (whois_where, sizeof whois_where, "%s", bufs[cur]->kind == BK_STATUS ? "" : bufs[cur]->name);
+  whois_at = Time_Monotonic (); whois_asked = 1;
+  snprintf (l, sizeof l, "WHOIS %s", nick);
+  irc_send_raw (conn, l);
+}
+
+static void whois_line (int kind, const char *fmt, ...)
+{
+  char t[1024];
+  va_list ap;
+  va_start (ap, fmt); vsnprintf (t, sizeof t, fmt, ap); va_end (ap);
+  add_line (whois_buffer (), (long) time (NULL), kind, NULL, t, 0, 0);
+}
+
+static void idle_text (long secs, char *out, size_t n)
+{
+  if (secs >= 86400) snprintf (out, n, "%ld days %ld h", secs / 86400, secs % 86400 / 3600);
+  else if (secs >= 3600) snprintf (out, n, "%ld h %ld min", secs / 3600, secs % 3600 / 60);
+  else if (secs >= 60) snprintf (out, n, "%ld min %ld s", secs / 60, secs % 60);
+  else snprintf (out, n, "%ld s", secs);
+}
+
+/* returns 1 if the numeric was a part of a WHOIS answer and has been shown */
+static int whois_numeric (const irc_event *e)
+{
+  const irc_msg *m = e->msg;
+  int n = m ? m->nparams : 0;
+#define P(i) (n > (i) ? m->params[i] : "")
+  switch (e->numeric)
+    {
+    case 311: case 314: whois_line (LK_INFO, "%s %s %s@%s (%s)", P (1), e->numeric == 311 ? "is" : "was", P (2), P (3), P (5)); return 1;
+    case 312: whois_line (LK_INFO, "%s is using the server %s (%s)", P (1), P (2), P (3)); return 1;
+    case 313: whois_line (LK_INFO, "%s is an IRC operator", P (1)); return 1;
+    case 317:
+      {
+	char idle[40], since[40] = "";
+	time_t t = (time_t) (atol (P (3)) + tz_offset);
+	struct tm *tm = n > 3 ? gmtime (&t) : NULL;
+	idle_text (atol (P (2)), idle, sizeof idle);
+	if (tm) strftime (since, sizeof since, ", signed on %d %b %Y %H:%M", tm);
+	whois_line (LK_INFO, "%s has been idle for %s%s", P (1), idle, since);
+	return 1;
+      }
+    case 319: whois_line (LK_INFO, "%s is in %s", P (1), P (2)); return 1;
+    case 330: whois_line (LK_INFO, "%s is logged in as %s", P (1), P (2)); return 1;
+    case 671: whois_line (LK_INFO, "%s is using a secure connection", P (1)); return 1;
+    case 301: whois_line (LK_INFO, "%s is away: %s", P (1), P (2)); return 1;
+    case 307: case 310: case 320: case 335: case 338: case 378: case 379: case 275: case 276:
+      whois_line (LK_INFO, "%s %s", P (1), P (n > 3 ? 3 : 2)); return 1;
+    case 318: whois_asked = 0; return 1;					/* the end: nothing to show */
+    case 401: case 402:
+      if (!whois_asked) return 0;
+      whois_line (LK_ERROR, "%s: %s", P (1), P (2)); whois_asked = 0; return 1;
+    }
+#undef P
+  return 0;
+}
+
 static void on_event (void *ud, const irc_event *e)
 {
   long when = e->time ? parse_time (e->time) : (long) time (NULL);
@@ -512,6 +586,7 @@ static void on_event (void *ud, const irc_event *e)
       if (srvlink) { link_closed = 1; if (want_connected) schedule_reconnect (); }
       break;
     case IRC_EV_NUMERIC:
+      if (whois_numeric (e)) break;
       status_line (e->numeric >= 400 && e->numeric < 600 ? LK_ERROR : LK_INFO, "%s", e->text);
       break;
     default: break;
@@ -773,7 +848,7 @@ static void run_command (char *line)
       if (*arg) { buffer *q = get_buffer (arg, BK_QUERY); select_buffer (buffer_index (q)); if (text && *text) irc_say (conn, arg, text); }
     }
   else if (!strcasecmp (cmd, "topic")) { if (b->kind == BK_CHANNEL) irc_set_topic (conn, b->name, *arg ? arg : NULL); }
-  else if (!strcasecmp (cmd, "whois")) { if (*arg) { char l[200]; snprintf (l, sizeof l, "WHOIS %s", arg); irc_send_raw (conn, l); } else status_line (LK_ERROR, "Usage: /whois nick"); }
+  else if (!strcasecmp (cmd, "whois")) { if (*arg) request_whois (arg); else if (bufs[cur]->kind == BK_QUERY) request_whois (bufs[cur]->name); else status_line (LK_ERROR, "Usage: /whois nick"); }
   else if (!strcasecmp (cmd, "mode")) { char l[400]; snprintf (l, sizeof l, "MODE %s%s%s", *arg && !strchr ("#&+!", arg[0]) && b->kind == BK_CHANNEL ? b->name : "", *arg && !strchr ("#&+!", arg[0]) && b->kind == BK_CHANNEL ? " " : "", arg); if (*arg) irc_send_raw (conn, l); }
   else if (b->kind == BK_CHANNEL && (!strcasecmp (cmd, "op") || !strcasecmp (cmd, "deop") || !strcasecmp (cmd, "voice") || !strcasecmp (cmd, "devoice")))
     {
@@ -1219,7 +1294,7 @@ static BOOL menu_handler (event_pollblock *event, void *reference)
       switch (sel[0])
 	{
 	case 0: select_buffer (buffer_index (get_buffer (menu_nick, BK_QUERY))); break;
-	case 1: snprintf (t, sizeof t, "WHOIS %s", menu_nick); irc_send_raw (conn, t); break;
+	case 1: request_whois (menu_nick); break;
 	case 2: case 3: case 4: case 5:
 	  if (bufs[cur]->kind == BK_CHANNEL) { snprintf (t, sizeof t, "MODE %s %c%c %s", bufs[cur]->name, sel[0] % 2 ? '-' : '+', sel[0] < 4 ? 'o' : 'v', menu_nick); irc_send_raw (conn, t); }
 	  break;
