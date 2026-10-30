@@ -9,3 +9,4 @@ tests/net/*.pyc
 app/test_settings
 app/test_logfile
 app/test_theme
+app/test_select
