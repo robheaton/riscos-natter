@@ -30,13 +30,13 @@ static menu_ptr netmenu;
 
 /* the text of the icons */
 static char t_nick[48], t_user[48], t_real[96], t_logdir[200], t_netname[48], t_host[128], t_port[8], t_netnick[48], t_sasl_user[64], t_sasl_pass[128], t_srv_pass[128], t_autojoin[256], t_pick[64];
-static char l_you[] = "Your names", l_nick[] = "Nick", l_user[] = "User name", l_real[] = "Real name", l_logs[] = "Logs", l_logopt[] = "Keep logs of the conversations", l_logdir[] = "Log folder", l_open[] = "Open";
+static char l_you[] = "Your names", l_nick[] = "Nick", l_user[] = "User name", l_real[] = "Real name", l_logs[] = "Logs", l_logopt[] = "Keep logs of the conversations", l_logdir[] = "Log folder", l_open[] = "Open", l_alerts[] = "Alerts", l_beepopt[] = "Beep when you are mentioned or messaged";
 static char l_net[] = "Network", l_new[] = "New", l_del[] = "Delete", l_name[] = "Name", l_server[] = "Server", l_port[] = "Port", l_tls[] = "Secure connection (TLS)", l_netnick[] = "Nick here", l_sasl[] = "Login account";
 static char l_pass[] = "Password", l_srvpass[] = "Server password", l_join[] = "Join at start", l_auto[] = "Connect when Natter starts", l_cancel[] = "Cancel", l_connect[] = "Connect", l_save[] = "Save";
 static char l_hint[] = "Nick, names and logs apply to every network.";
 static char v_pass[] = "D*", v_port[] = "A0-9", v_opt[] = "Soptoff,opton";
 
-static icon_handle i_nick, i_user, i_real, i_log, i_logdir, i_open, i_pick, i_new, i_del, i_netname, i_host, i_port, i_tls, i_netnick, i_sasl_user, i_sasl_pass, i_srv_pass, i_autojoin, i_auto, i_cancel, i_connect, i_save;
+static icon_handle i_nick, i_user, i_real, i_log, i_beep, i_logdir, i_open, i_pick, i_new, i_del, i_netname, i_host, i_port, i_tls, i_netnick, i_sasl_user, i_sasl_pass, i_srv_pass, i_autojoin, i_auto, i_cancel, i_connect, i_save;
 static icon_handle order[12];					/* the writable fields in the order of the Tab key */
 static int norder;
 
@@ -63,6 +63,7 @@ static void load_global (void)
 {
   Icon_SetText (win, i_nick, ed.nick); Icon_SetText (win, i_user, ed.user); Icon_SetText (win, i_real, ed.realname);
   set_opt (i_log, ed.log);
+  set_opt (i_beep, ed.beep);
   Icon_SetText (win, i_logdir, ed.logdir);
 }
 
@@ -70,6 +71,7 @@ static void store_global (void)
 {
   copy (ed.nick, sizeof ed.nick, Icon_GetTextPtr (win, i_nick)); copy (ed.user, sizeof ed.user, Icon_GetTextPtr (win, i_user)); copy (ed.realname, sizeof ed.realname, Icon_GetTextPtr (win, i_real));
   ed.log = get_opt (i_log);
+  ed.beep = get_opt (i_beep);
   copy (ed.logdir, sizeof ed.logdir, Icon_GetTextPtr (win, i_logdir));
 }
 
@@ -224,7 +226,7 @@ void choices_init (const choices_callbacks *callbacks)
 {
   window_block wb;
   int r, height;
-  static const int rows = 18;							/* the row of the buttons: the last one, so the window ends just below them */
+  static const int rows = 20;							/* the row of the buttons: the last one, so the window ends just below them */
   cb = callbacks;
   height = 24 + rows * ROW + 52 + 20;						/* the buttons are 52 high */
   memset (&wb, 0, sizeof wb);
@@ -249,6 +251,8 @@ void choices_init (const choices_callbacks *callbacks)
   label (r, l_logdir);
   i_logdir = field (r, t_logdir, sizeof t_logdir, NULL, FLD_R - 130);
   i_open = mk (FLD_R - 110, rowtop (r) - 44, FLD_R, rowtop (r) - 4, F_BUTTON, l_open, sizeof l_open, NULL); r++;
+  label (r++, l_alerts);
+  i_beep = mk (LBL_X, rowtop (r) - 44, FLD_R, rowtop (r) - 4, F_OPTION, l_beepopt, sizeof l_beepopt, v_opt); r++;
   label (r, l_net);
   i_pick = mk (FLD_X, rowtop (r) - 44, FLD_R - 250, rowtop (r) - 4, F_POPUP, t_pick, sizeof t_pick, NULL);
   i_new = mk (FLD_R - 230, rowtop (r) - 44, FLD_R - 120, rowtop (r) - 4, F_BUTTON, l_new, sizeof l_new, NULL);

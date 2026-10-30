@@ -21,7 +21,7 @@ int main (void)
   int i;
 
   settings_defaults (&s);
-  CHECK_STR (s.nick, "natter_user"); CHECK_INT (s.log, 1); CHECK_INT (s.nnets, 0);
+  CHECK_STR (s.nick, "natter_user"); CHECK_INT (s.log, 1); CHECK_INT (s.nnets, 0); CHECK_INT (s.beep, 1);
   CHECK_INT (settings_load (&s, "/nonexistent/folder/file"), -1); CHECK_STR (s.nick, "natter_user");	/* a missing file leaves the defaults */
 
   write_file (p, "# my choices\nnick = alice\nuser=al\nrealname =  Alice A  \nlog = no\nlogdir = Logs\n\n"
@@ -46,6 +46,12 @@ int main (void)
   CHECK_INT (t.nnets, 3); CHECK_STR (t.nick, "alice"); CHECK_INT (t.log, 0);
   CHECK_STR (t.nets[0].sasl_pass, "s3cret # not a comment"); CHECK_STR (t.nets[1].nick, "other"); CHECK_INT (t.nets[1].port, 6667); CHECK_INT (t.nets[2].tls, 0); CHECK_INT (t.nets[0].autoconnect, 1);
   CHECK_INT (t.nets[0].log, -1); CHECK_INT (t.nets[1].log, 0);
+  {									/* the beep (settings of its own: the checks below go on with s) */
+    settings u, v;
+    write_file (tmp ("beepfile"), "beep = no\n"); settings_load (&u, tmp ("beepfile")); CHECK_INT (u.beep, 0);
+    CHECK_INT (settings_save (&u, tmp ("beep")), 0); settings_load (&v, tmp ("beep")); CHECK_INT (v.beep, 0);
+    write_file (tmp ("beepfile"), "nick = x\n"); settings_load (&u, tmp ("beepfile")); CHECK_INT (u.beep, 1);			/* an old file: on */
+  }
   CHECK_INT (settings_save (&s, "/nonexistent/folder/file"), -1);
 
   /* a value with a line break cannot start a new setting */

@@ -3,6 +3,7 @@
      # a comment
      nick = alice
      log = on
+     beep = yes
      font_size = 11
      theme = dark
      colour_background = 101820
@@ -45,6 +46,7 @@ typedef struct
 {
   char nick[48], user[48], realname[96];	/* for networks that have none of their own */
   int log;				/* keep logs of the conversations (default yes) */
+  int beep;				/* a beep when the nick is mentioned or a private message comes (default yes) */
   char logdir[200];			/* where the logs go; empty: the default */
   int font_size;			/* points, FONT_MIN to FONT_MAX */
   int theme;				/* THEME_LIGHT or THEME_DARK: the colours that are not set below */

@@ -20,6 +20,7 @@ void settings_defaults (settings *s)
   copy (s->user, sizeof s->user, "natter");
   copy (s->realname, sizeof s->realname, "Natter on RISC OS 64");
   s->log = 1;
+  s->beep = 1;
   s->font_size = FONT_DEFAULT;
 }
 
@@ -138,6 +139,7 @@ int settings_load (settings *s, const char *path)
 	else if (!strcasecmp (k, "user")) copy (s->user, sizeof s->user, v);
 	else if (!strcasecmp (k, "realname")) copy (s->realname, sizeof s->realname, v);
 	else if (!strcasecmp (k, "log")) s->log = yes (v);
+	else if (!strcasecmp (k, "beep")) s->beep = yes (v);
 	else if (!strcasecmp (k, "logdir")) copy (s->logdir, sizeof s->logdir, v);
 	else if (!strcasecmp (k, "font_size")) s->font_size = atoi (v) > 0 ? font_size_clamp (atoi (v)) : FONT_DEFAULT;
 	else if (!strcasecmp (k, "theme")) s->theme = !strcasecmp (v, "dark") ? THEME_DARK : THEME_LIGHT;
@@ -169,6 +171,7 @@ int settings_save (const settings *s, const char *path)
   fprintf (f, "# Natter choices.  The passwords are here as you typed them: keep this file private.\n");
   put (f, "nick", s->nick); put (f, "user", s->user); put (f, "realname", s->realname);
   fprintf (f, "log = %s\n", s->log ? "yes" : "no");
+  fprintf (f, "beep = %s\n", s->beep ? "yes" : "no");
   if (s->logdir[0]) put (f, "logdir", s->logdir);
   fprintf (f, "font_size = %d\ntheme = %s\n", font_size_clamp (s->font_size), s->theme == THEME_DARK ? "dark" : "light");
   for (i = 0; i < NCOLOURS; i++) if (colour_parse (s->colours[i], NULL)) put (f, colour_keys[i], s->colours[i]);

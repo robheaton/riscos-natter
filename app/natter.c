@@ -396,6 +396,20 @@ static int log_enabled (const buffer *b)
 }
 
 /* a line for a buffer */
+/* A beep when the nick is mentioned or a private message comes, unless the conversation is the one that is being looked at (the caret is in the input line) or one came a moment ago. */
+static void mention_beep (const buffer *b)
+{
+  static unsigned last; static int any;
+  unsigned now = Time_Monotonic ();
+  caret_block caret;
+  if (!cfg_set.beep) return;
+  if (any && (int) (now - last) < 300) return;
+  Wimp_GetCaretPosition (&caret);
+  if (b == bufs[cur] && caret.window == win_input) return;
+  last = now; any = 1;
+  SWI (0, 0, SWI_OS_WriteI + 7);
+}
+
 static void add_line (buffer *b, long when, int kind, const char *nick, const char *text, int self, int highlight)
 {
   int colour = nick ? nick_colour (nick) : 0;
@@ -403,6 +417,7 @@ static void add_line (buffer *b, long when, int kind, const char *nick, const ch
   int follow = shown && main_at_bottom ();
   size_t dropped = buffer_add (b, when, kind, nick, text, colour, highlight, self, measure_cb, NULL);
   if (dropped && b == sel_buf) { sel_shift (&sel, dropped); if (!sel.active) sel_buf = NULL; }			/* the first lines were dropped */
+  if (!self && (kind == LK_TEXT || kind == LK_ACTION) && (highlight || b->kind == BK_QUERY)) mention_beep (b);
   if (lg && !demo_active && log_enabled (b))
     {
       char t[1300];
