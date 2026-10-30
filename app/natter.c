@@ -1047,6 +1047,39 @@ static icon_handle bar_icon = -1;
 static int have_icon;
 static void quit_app (void);
 
+/* The icon on the icon bar: the sprite !natter of the Wimp's pool (the file !Sprites is loaded by !Boot and !Run), or natterhl while something that mentions us is waiting.  The name of the
+   sprite is in a buffer of ours (an indirected sprite), so that it can be changed. */
+static char bar_sprite[16] = "!natter";
+
+static void make_bar_icon (void)
+{
+  icon_createblock ic;
+  os_error *e;
+  memset (&ic, 0, sizeof ic);
+  ic.window = iconbar_RIGHT;
+  ic.icondata.workarearect.min.x = 0; ic.icondata.workarearect.min.y = 0; ic.icondata.workarearect.max.x = 68; ic.icondata.workarearect.max.y = 68;
+  ic.icondata.flags.value = (7u << 24) | (1u << 28) | (3u << 12) | 0x2u | 0x8u | 0x10u | 0x100u;	/* sprite, centred, indirected, clicks */
+  ic.icondata.data.indirectsprite.name = DL_PTR (bar_sprite);
+  ic.icondata.data.indirectsprite.spritearea = (dl_ptr) 1;					/* the Wimp's sprite pool */
+  ic.icondata.data.indirectsprite.nameisname = sizeof bar_sprite;
+  e = Wimp_CreateIcon (&ic, &bar_icon);
+  if (e) { LOG ("no icon on the icon bar: %s", e->errmess); bar_icon = -1; }				/* no error box: Natter works without it */
+}
+
+static void update_bar_icon (void)
+{
+  int i, hl = 0;
+  const char *want;
+  if (bar_icon < 0) return;
+  for (i = 0; i < nbufs; i++) hl += bufs[i]->highlights;
+  want = hl ? "natterhl" : "!natter";
+  if (strcmp (want, bar_sprite))
+    {
+      snprintf (bar_sprite, sizeof bar_sprite, "%s", want);
+      Icon_ForceRedraw (window_ICONBAR, bar_icon)
+    }
+}
+
 static void close_buffer (int i)
 {
   buffer *b;
@@ -1277,6 +1310,7 @@ static BOOL null_handler (event_pollblock *event, void *reference)
   pump_output ();
   if (now - last_tick >= 100) { last_tick = now; irc_conn_tick (conn, now); }
   { static unsigned last_flush; if (lg && now - last_flush >= 300) { last_flush = now; logger_flush (lg); } }
+  { static unsigned last_icon; if (now - last_icon >= 100) { last_icon = now; update_bar_icon (); } }
   Wimp_GetWindowState (win_main, &st);						/* the window may have been resized */
   {
     int w = st.openblock.screenrect.max.x - st.openblock.screenrect.min.x;
@@ -1424,7 +1458,7 @@ int main (void)
   Event_Claim (event_CLOSE, win_main, event_ANY, close_handler, NULL);
   Event_Claim (event_NULL, event_ANY, event_ANY, null_handler, NULL);
   build_menus ();
-  bar_icon = Icon_BarIcon ("file_fff", iconbar_RIGHT);					/* a stock sprite until Natter has its own */
+  make_bar_icon ();
   if (bar_icon >= 0) { have_icon = 1; Event_Claim (event_CLICK, window_ICONBAR, bar_icon, icon_click, NULL); }
   LOG ("icon bar icon %d", (int) bar_icon);
   settings_load (&cfg_set, CHOICES_READ);
