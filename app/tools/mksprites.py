@@ -60,13 +60,13 @@ def render(hl):
 def sprite_block(name, pix):
     mode = 1 | (DPI << 1) | (DPI << 14) | (6 << 27)           # new format, 32 bits a pixel
     image = bytearray()
-    for py in range(N - 1, -1, -1):                           # a sprite is stored from the bottom row up
+    for py in range(N):                                       # a sprite is stored from the top row down
         for px in range(N):
             c = pix[py][px] or (0, 0, 0)
             image += struct.pack("<I", (c[2] << 16) | (c[1] << 8) | c[0])
     words = (N + 31) // 32
     mask = bytearray()
-    for py in range(N - 1, -1, -1):
+    for py in range(N):
         row = [0] * words
         for px in range(N):
             if pix[py][px]:
