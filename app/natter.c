@@ -31,6 +31,7 @@
 #include "net.h"
 #include "settings.h"
 #include "logfile.h"
+#include "choices.h"
 
 /* ---- the geometry, in OS units ---- */
 #define LH 36				/* a row of the scrollback */
@@ -752,6 +753,7 @@ static void run_command (char *line)
 	}
     }
   else if (!strcasecmp (cmd, "save")) save_settings ();
+  else if (!strcasecmp (cmd, "choices")) choices_show (&cfg_set, settings_find (&cfg_set, cur_net.name));
   else if (!strcasecmp (cmd, "log"))
     {
       char path[400];
@@ -799,7 +801,7 @@ static void run_command (char *line)
     }
   else if (!strcasecmp (cmd, "quit")) { want_connected = 0; reconnect_at = 0; irc_quit (conn, *arg ? arg : "Natter"); }
   else if (!strcasecmp (cmd, "raw") || !strcasecmp (cmd, "quote")) irc_send_raw (conn, arg);
-  else if (!strcasecmp (cmd, "help")) status_line (LK_INFO, "Commands: /connect NAME or host [port] [notls], /networks, /savenet NAME, /autojoin #a,#b, /log on|off, /disconnect, /demo, /join, /part, /me, /nick, /msg, /query, /topic, /whois, /op /deop /voice /devoice, /kick, /ban, /mode, /quit, /raw");
+  else if (!strcasecmp (cmd, "help")) status_line (LK_INFO, "Commands: /connect NAME or host [port] [notls], /choices, /networks, /savenet NAME, /autojoin #a,#b, /log on|off, /disconnect, /demo, /join, /part, /me, /nick, /msg, /query, /topic, /whois, /op /deop /voice /devoice, /kick, /ban, /mode, /quit, /raw");
   else status_line (LK_ERROR, "Unknown command: /%s (try /help)", cmd);
 }
 
@@ -1037,6 +1039,31 @@ static BOOL topic_redraw (event_pollblock *event, void *reference)
   return TRUE;
 }
 
+/* ---- the Choices window ---- */
+
+static void ch_saved (const settings *s)
+{
+  const char *old = logdir;
+  char before[sizeof logdir];
+  snprintf (before, sizeof before, "%s", old);
+  cfg_set = *s;
+  snprintf (logdir, sizeof logdir, "%s", cfg_set.logdir[0] ? cfg_set.logdir : "<Choices$Write>.Natter.Logs");
+  if (strcmp (before, logdir)) { logger_free (lg); lg = logger_new (logdir, "."); }
+  save_settings ();
+}
+
+static void ch_connect (int index) { if (index >= 0 && index < cfg_set.nnets) connect_network (&cfg_set.nets[index]); }
+
+static void ch_open_logs (void)
+{
+  char cmd[300];
+  mkdir ("<Choices$Write>.Natter", 0777); mkdir (logdir, 0777);
+  snprintf (cmd, sizeof cmd, "Filer_OpenDir %s", logdir);
+  Wimp_StartTask (cmd);
+}
+
+static const choices_callbacks ch_callbacks = { ch_saved, ch_connect, ch_open_logs };
+
 /* ---- menus ---- */
 
 static menu_ptr m_icon, m_chan, m_nick, m_nets;
@@ -1102,7 +1129,7 @@ static void put_in_input (const char *text)
 
 static void build_menus (void)
 {
-  m_icon = Menu_New ("Natter", "Info,Networks,Choices folder,Logs folder|Quit");
+  m_icon = Menu_New ("Natter", "Info,Networks,Choices...|Quit");
   m_chan = Menu_New ("Conversation", "Join channel...,Part channel,Topic...|Log this conversation,Open log|Close conversation");
   m_nick = Menu_New ("Person", "Talk to,Who is|Give op,Take op,Give voice,Take voice|Kick,Ban|Insert in line");
 }
@@ -1161,19 +1188,15 @@ static BOOL menu_handler (event_pollblock *event, void *reference)
 {
   int *sel = event->data.selection;
   (void) reference;
+  if (choices_handle_menu (sel)) return TRUE;						/* the popup of the Choices window */
   if (shown == m_icon)
     {
       switch (sel[0])
 	{
 	case 0: status_line (LK_INFO, "Natter 0.1 for RISC OS 64: an IRC client. Logs: %s", logdir); break;
 	case 1: if (sel[1] >= 0 && sel[1] < cfg_set.nnets) connect_network (&cfg_set.nets[sel[1]]); break;
-	case 2:									/* the folder, not the file: Filer_Run of a text file fails until the Filer has seen a text editor */
-	  { FILE *f = fopen (CHOICES_WRITE, "r"); if (!f) save_settings (); else fclose (f); Wimp_StartTask ("Filer_OpenDir <Choices$Write>.Natter"); }
-	  break;
-	case 3:
-	  { char cmd[300]; mkdir ("<Choices$Write>.Natter", 0777); mkdir (logdir, 0777); snprintf (cmd, sizeof cmd, "Filer_OpenDir %s", logdir); Wimp_StartTask (cmd); }
-	  break;
-	case 4: quit_app (); break;
+	case 2: choices_show (&cfg_set, settings_find (&cfg_set, cur_net.name)); break;
+	case 3: quit_app (); break;
 	}
     }
   else if (shown == m_chan && menu_buf >= 0 && menu_buf < nbufs)
@@ -1464,6 +1487,7 @@ int main (void)
   Event_Claim (event_CLOSE, win_main, event_ANY, close_handler, NULL);
   Event_Claim (event_NULL, event_ANY, event_ANY, null_handler, NULL);
   build_menus ();
+  choices_init (&ch_callbacks);
   make_bar_icon ();
   if (bar_icon >= 0) { have_icon = 1; Event_Claim (event_CLICK, window_ICONBAR, bar_icon, icon_click, NULL); }
   LOG ("icon bar icon %d", (int) bar_icon);

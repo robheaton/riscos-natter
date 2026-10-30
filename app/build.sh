@@ -11,7 +11,7 @@ CC=$TC/bin/aarch64-riscos-gcc
 A=$HERE/out/'!Natter'
 mkdir -p "$A/Resources"
 $CC -munixlib -O2 -fsigned-char -std=gnu99 -Wall -Wextra -Wno-unused-parameter -I "$DL/include" -I "$SSL/include" -I "$HERE/../core" -I "$HERE" \
-  "$HERE/natter.c" "$HERE/buffer.c" "$HERE/demo.c" "$HERE/net.c" "$HERE/settings.c" "$HERE/logfile.c" "$HERE/../core/irc_parse.c" "$HERE/../core/irc_conn.c" "$HERE/../core/irc_chan.c" \
+  "$HERE/natter.c" "$HERE/buffer.c" "$HERE/demo.c" "$HERE/net.c" "$HERE/settings.c" "$HERE/logfile.c" "$HERE/choices.c" "$HERE/../core/irc_parse.c" "$HERE/../core/irc_conn.c" "$HERE/../core/irc_chan.c" \
   "$DL/lib/libDeskLib64.a" "$SSL/lib/libssl.a" "$SSL/lib/libcrypto.a" -o "$A/!RunImage,ff8"
 cp "$HERE/Resources/ca-bundle" "$A/Resources/ca-bundle"
 cp "$HERE/!Sprites,ff9" "$A/!Sprites,ff9"
