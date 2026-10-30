@@ -39,7 +39,7 @@ static char t_nick[48], t_user[48], t_real[96], t_logdir[200], t_netname[48], t_
 static char l_you[] = "Your names", l_nick[] = "Nick", l_user[] = "User name", l_real[] = "Real name", l_logs[] = "Logs", l_logopt[] = "Keep logs of the conversations", l_logdir[] = "Log folder", l_open[] = "Open";
 static char l_net[] = "Network", l_new[] = "New", l_del[] = "Delete", l_name[] = "Name", l_server[] = "Server", l_port[] = "Port", l_tls[] = "Secure connection (TLS)", l_netnick[] = "Nick here", l_sasl[] = "Login account";
 static char l_pass[] = "Password", l_srvpass[] = "Server password", l_join[] = "Join at start", l_auto[] = "Connect when Natter starts", l_cancel[] = "Cancel", l_connect[] = "Connect", l_save[] = "Save";
-static char l_hint[] = "Nick, names and logs are for all networks; a nick for one network is optional.";
+static char l_hint[] = "Nick, names and logs apply to every network.";
 static char v_pass[] = "D*", v_port[] = "A0-9", v_opt[] = "Soptoff,opton";
 
 static icon_handle i_nick, i_user, i_real, i_log, i_logdir, i_open, i_pick, i_new, i_del, i_netname, i_host, i_port, i_tls, i_netnick, i_sasl_user, i_sasl_pass, i_srv_pass, i_autojoin, i_auto, i_cancel, i_connect, i_save;
@@ -63,12 +63,13 @@ static icon_handle mk (int x0, int y0, int x1, int y1, unsigned flags, char *buf
 
 static int rowtop (int r) { return -(24 + r * ROW); }
 static void label (int r, char *text) { mk (LBL_X, rowtop (r) - 44, LBL_X + LBL_W, rowtop (r) - 4, F_LABEL, text, strlen (text) + 1, NULL); }
-static icon_handle field (int r, char *buf, size_t n, char *val, int right)
+static icon_handle field_at (int r, int left, char *buf, size_t n, char *val, int right)
 {
-  icon_handle h = mk (FLD_X, rowtop (r) - 44, right, rowtop (r) - 4, F_FIELD, buf, n, val);
+  icon_handle h = mk (left, rowtop (r) - 44, right, rowtop (r) - 4, F_FIELD, buf, n, val);
   if (norder < 12) order[norder++] = h;
   return h;
 }
+static icon_handle field (int r, char *buf, size_t n, char *val, int right) { return field_at (r, FLD_X, buf, n, val, right); }
 
 /* ---- between the icons and the copy ---- */
 
@@ -242,9 +243,9 @@ void choices_init (const choices_callbacks *callbacks)
 {
   window_block wb;
   int r, height;
-  static const int rows = 20;
+  static const int rows = 18;							/* the row of the buttons: the last one, so the window ends just below them */
   cb = callbacks;
-  height = 24 + rows * ROW + 20;
+  height = 24 + rows * ROW + 52 + 20;						/* the buttons are 52 high */
   memset (&wb, 0, sizeof wb);
   wb.screenrect.min.x = 200; wb.screenrect.min.y = 100; wb.screenrect.max.x = 200 + W; wb.screenrect.max.y = 100 + height;
   wb.behind = -1;
@@ -274,7 +275,7 @@ void choices_init (const choices_callbacks *callbacks)
   label (r, l_name); i_netname = field (r++, t_netname, sizeof t_netname, NULL, FLD_R);
   label (r, l_server); i_host = field (r, t_host, sizeof t_host, NULL, FLD_R - 250);
   mk (FLD_R - 230, rowtop (r) - 44, FLD_R - 160, rowtop (r) - 4, F_LABEL, l_port, sizeof l_port, NULL);
-  i_port = field (r++, t_port, sizeof t_port, v_port, FLD_R);
+  i_port = field_at (r++, FLD_R - 150, t_port, sizeof t_port, v_port, FLD_R);
   i_tls = mk (FLD_X, rowtop (r) - 44, FLD_R, rowtop (r) - 4, F_OPTION, l_tls, sizeof l_tls, v_opt); r++;
   label (r, l_netnick); i_netnick = field (r++, t_netnick, sizeof t_netnick, NULL, FLD_R);
   label (r, l_sasl); i_sasl_user = field (r++, t_sasl_user, sizeof t_sasl_user, NULL, FLD_R);
