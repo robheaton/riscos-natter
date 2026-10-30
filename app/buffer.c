@@ -71,7 +71,7 @@ buffer *buffer_new (const char *name, int kind, int network)
   return b;
 }
 
-static void line_free (bline *l) { free (l->nick); free (l->text); free (l->starts); }
+static void line_free (bline *l) { free (l->nick); free (l->text); free (l->starts); free (l->runs); }
 
 void buffer_free (buffer *b)
 {
@@ -103,7 +103,8 @@ size_t buffer_add (buffer *b, long when, int kind, const char *nick, const char 
   if (b->n == b->cap) { b->cap = b->cap ? b->cap * 2 : 64; b->lines = xrealloc (b->lines, b->cap * sizeof *b->lines); }
   l = &b->lines[b->n];
   memset (l, 0, sizeof *l);
-  l->when = when; l->kind = kind; l->nick = nick ? xstrdup (nick) : NULL; l->text = xstrdup (text);
+  l->when = when; l->kind = kind; l->nick = nick ? xstrdup (nick) : NULL;
+  fmt_parse (text, &l->text, &l->runs, &l->nruns);
   l->colour = colour; l->highlight = highlight; l->self = self;
   line_layout (b, l, m, ud);
   b->n++;

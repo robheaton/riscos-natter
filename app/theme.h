@@ -18,6 +18,7 @@ typedef struct
   unsigned marker;		/* the line above the first new message */
   unsigned badge;		/* the badge of unread lines */
   unsigned query;		/* the name of a private conversation in the buffer list */
+  unsigned link;		/* web addresses in the text */
   unsigned nick[NICK_COLOURS];	/* the colours of the nicks */
 } palette;
 

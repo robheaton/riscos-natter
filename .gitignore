@@ -10,3 +10,5 @@ app/test_settings
 app/test_logfile
 app/test_theme
 app/test_select
+app/test_format
+app/test_links

@@ -9,6 +9,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include "DeskLib:Core.h"
+#include "DeskLib:File.h"
 #include "DeskLib:Event.h"
 #include "DeskLib:EventMsg.h"
 #include "DeskLib:Handler.h"
@@ -35,6 +36,8 @@
 #include "appearance.h"
 #include "theme.h"
 #include "select.h"
+#include "links.h"
+#include "format.h"
 #include "clip.h"
 
 /* ---- the geometry, in OS units ---- */
@@ -142,20 +145,25 @@ static void log_sync (void)
 
 /* ---- text and fonts ---- */
 
-static int measure_cb (void *ud, int italic, const char *s, size_t len)
+static int font_width (font_handle f, const char *s, size_t len)
 {
   font_string fs;
   char tmp[1024], *p = tmp;
-  (void) ud;
   if (len >= sizeof tmp) p = malloc (len + 1);
   if (!p) return 0;
   memcpy (p, s, len); p[len] = 0;
   memset (&fs, 0, sizeof fs);
-  Font_SetFont (italic ? fital : fnorm);
+  Font_SetFont (f);
   fs.s = DL_PTR (p); fs.x = 1 << 30; fs.y = 1 << 30; fs.split = -1; fs.term = (int) len;
   if (Font_StringWidth (&fs)) fs.x = 0;
   if (p != tmp) free (p);
   return fs.x / 400;
+}
+
+static int measure_cb (void *ud, int italic, const char *s, size_t len)
+{
+  (void) ud;
+  return font_width (italic ? fital : fnorm, s, len);
 }
 
 static int bold_width (const char *s)
@@ -398,7 +406,7 @@ static void add_line (buffer *b, long when, int kind, const char *nick, const ch
   if (lg && !demo_active && log_enabled (b))
     {
       char t[1300];
-      log_format (t, sizeof t, when, tz_offset, kind, nick, text);
+      log_format (t, sizeof t, when, tz_offset, kind, nick, b->lines[b->n - 1].text);			/* the plain text: the logs have no formatting codes */
       logger_add (lg, cur_net.name[0] ? cur_net.name : "Natter", b->kind, b->name, t);
     }
   if (shown)
@@ -998,6 +1006,61 @@ static BOOL key_handler (event_pollblock *event, void *reference)
 
 /* ---- drawing ---- */
 
+/* ---- the text of a row: in pieces of one style ---- */
+
+static unsigned luminance (unsigned bgr) { return (((bgr >> 8) & 0xFF) * 299 + ((bgr >> 16) & 0xFF) * 587 + ((bgr >> 24) & 0xFF) * 114) / 1000; }	/* 0xBBGGRR00: 0 to 255 */
+
+static unsigned fmt_colour (int c, unsigned def)
+{
+  long rgb = fmt_rgb (c);
+  return rgb < 0 ? def : colour_bgr ((unsigned) rgb);
+}
+
+/* Paints bytes [from, to) of the text of line l, starting at x0.  The row is cut where the style changes, where a web address starts or ends, and at the ends of the selection [sf, st);
+   each piece is painted on its own background.  fg0 is the colour of the text of this kind of line, bg the background of the line. */
+static void paint_row_text (const bline *l, size_t from, size_t to, int has_sel, size_t sf, size_t st, int x0, int y0, int base, unsigned fg0, unsigned bg)
+{
+  size_t cuts[80], k, nc = 0, nl;
+  linkspan links[16];
+  const char *text = l->text;
+  int x = x0;
+  size_t i, j;
+  if (to <= from) return;
+  nl = links_find (text, links, 16);
+  cuts[nc++] = from; cuts[nc++] = to;
+  for (k = 0; k < l->nruns && nc < 76; k++) if (l->runs[k].off > from && l->runs[k].off < to) cuts[nc++] = l->runs[k].off;
+  for (k = 0; k < nl && nc < 76; k++)
+    {
+      if (links[k].from > from && links[k].from < to) cuts[nc++] = links[k].from;
+      if (links[k].to > from && links[k].to < to) cuts[nc++] = links[k].to;
+    }
+  if (has_sel) { if (sf > from && sf < to) cuts[nc++] = sf; if (st > from && st < to) cuts[nc++] = st; }
+  for (i = 1; i < nc; i++) { size_t v = cuts[i]; for (j = i; j > 0 && cuts[j - 1] > v; j--) cuts[j] = cuts[j - 1]; cuts[j] = v; }
+  for (i = 0; i + 1 < nc; i++)
+    {
+      size_t a = cuts[i], b = cuts[i + 1], q;
+      fmtrun sty;
+      int selected = has_sel && a >= sf && b <= st, in_link = 0, hasbg, w;
+      unsigned fg, bgc, bgcol;
+      font_handle f;
+      if (b <= a) continue;
+      fmt_style_at (l->runs, l->nruns, a, &sty);
+      for (q = 0; q < nl; q++) if (links[q].from <= a && b <= links[q].to) in_link = 1;
+      fg = fmt_colour (sty.fg, fg0); bgc = fmt_colour (sty.bg, bg); hasbg = fmt_rgb (sty.bg) >= 0;
+      if (sty.flags & FMT_REVERSE) { unsigned t = fg; fg = hasbg ? bgc : bg; bgc = t; hasbg = 1; }
+      bgcol = selected ? COL_SEL : hasbg ? bgc : bg;
+      if (in_link) fg = pal.link;
+      if ((int) luminance (fg) - (int) luminance (bgcol) < 60 && (int) luminance (bgcol) - (int) luminance (fg) < 60) fg = luminance (bgcol) > 140 ? 0x00000000 : 0xFFFFFF00;	/* it can be read */
+      f = (sty.flags & FMT_BOLD) ? fbold : ((sty.flags & FMT_ITALIC) || l->kind == LK_ACTION) ? fital : fnorm;
+      w = font_width (f, text + a, b - a);
+      if (selected || hasbg) fill (x, y0, w, LH, bgcol);
+      paint (f, fg, bgcol, x, base, text + a, b - a);
+      if ((sty.flags & FMT_UNDERLINE) || in_link) fill (x, base - 4, w, 2, fg);
+      if (sty.flags & FMT_STRIKE) fill (x, base + font_pt, w, 2, fg);
+      x += w;
+    }
+}
+
 static void draw_scrollback (window_redrawblock *rb)
 {
   buffer *b = bufs[cur];
@@ -1049,23 +1112,8 @@ static void draw_scrollback (window_redrawblock *rb)
 	}
       text = l->text; from = l->starts[rowin]; to = rowin + 1 < l->nrows ? l->starts[rowin + 1] : strlen (text);
       while (to > from && text[to - 1] == ' ') to--;
-      {
-	font_handle f = l->kind == LK_ACTION ? fital : fnorm;
-	unsigned fg = l->kind == LK_ERROR ? COL_RED : (l->kind == LK_TEXT || l->kind == LK_ACTION || l->kind == LK_NOTICE || l->kind == LK_INFO) ? COL_TEXT : COL_MUTED;
-	if (has_sel && sf < to && st > from)						/* the selected part of the row on its own background */
-	  {
-	    int italic = l->kind == LK_ACTION, x0 = ox + TEXT_X;
-	    int xs = x0 + (sf > from ? measure_cb (NULL, italic, text + from, sf - from) : 0);
-	    int xe = x0 + measure_cb (NULL, italic, text + from, (st < to ? st : to) - from);
-	    if (sf < from) sf = from;
-	    if (st > to) st = to;
-	    fill (xs, y0, xe - xs, LH, COL_SEL);
-	    if (sf > from) paint (f, fg, bg, x0, base, text + from, sf - from);
-	    paint (f, fg, COL_SEL, xs, base, text + sf, st - sf);
-	    if (st < to) paint (f, fg, bg, xe, base, text + st, to - st);
-	  }
-	else paint (f, fg, bg, ox + TEXT_X, base, text + from, to - from);
-      }
+      paint_row_text (l, from, to, has_sel, sf, st, ox + TEXT_X, y0, base,
+		      l->kind == LK_ERROR ? COL_RED : (l->kind == LK_TEXT || l->kind == LK_ACTION || l->kind == LK_NOTICE || l->kind == LK_INFO) ? COL_TEXT : COL_MUTED, bg);
     }
 }
 
@@ -1513,6 +1561,53 @@ static BOOL drag_ended (event_pollblock *event, void *reference)
   return TRUE;
 }
 
+/* ---- web addresses: a click opens them ---- */
+
+/* Opens an address in the browser that the system has for HTML: a small page that sends the browser on to the address is run with the Filer, which gives it to whatever is set up for the file type
+   (the Pi has no URI module).  The address is checked by links_find: http, https, ftp or ftps. */
+static void open_url (const char *addr)
+{
+  static int serial;
+  char path[80], cmd[120], esc[1200];
+  size_t n = 0;
+  FILE *f;
+  const char *p;
+  for (p = addr; *p && n < sizeof esc - 8; p++)
+    {
+      if (*p == '&') { memcpy (esc + n, "&amp;", 5); n += 5; }
+      else if (*p == '"') { memcpy (esc + n, "%22", 3); n += 3; }
+      else if (*p == '<') { memcpy (esc + n, "%3C", 3); n += 3; }
+      else if (*p == '>') { memcpy (esc + n, "%3E", 3); n += 3; }
+      else if (*p == '\'') { memcpy (esc + n, "%27", 3); n += 3; }
+      else if ((unsigned char) *p < 33) { memcpy (esc + n, "%20", 3); n += 3; }
+      else esc[n++] = *p;
+    }
+  esc[n] = 0;
+  snprintf (path, sizeof path, "<Wimp$ScrapDir>.NatterLink%d", serial++ & 3);
+  f = fopen (path, "w");
+  if (!f) { status_line (LK_ERROR, "Cannot make the page that opens %s", addr); return; }
+  fprintf (f, "<html><head><meta http-equiv=\"refresh\" content=\"0;url=%s\"><title>Natter link</title></head><body><a href=\"%s\">%s</a></body></html>\n", esc, esc, esc);
+  fclose (f);
+  File_SetType (path, 0xFAF);
+  snprintf (cmd, sizeof cmd, "Filer_Run %s", path);
+  Wimp_StartTask (cmd);
+  LOG ("open url %s", addr);
+}
+
+/* the address under a place in the text of the current conversation (not at its very first or last byte: a click on the edge of the text is a click beside it) */
+static int link_at (selpos p, char *addr, size_t size)
+{
+  linkspan sp[16];
+  size_t n, k;
+  const bline *l;
+  if (p.line >= bufs[cur]->n) return 0;
+  l = &bufs[cur]->lines[p.line];
+  n = links_find (l->text, sp, 16);
+  for (k = 0; k < n; k++)
+    if (p.off > sp[k].from && p.off < sp[k].to) return links_address (l->text, &sp[k], addr, size);
+  return 0;
+}
+
 /* ---- the mouse ---- */
 
 static BOOL left_click (event_pollblock *event, void *reference)
@@ -1576,7 +1671,14 @@ static BOOL main_click (event_pollblock *event, void *reference)
       selpos f, t;
       if (sel_word (bufs[cur], p, &f, &t)) { sel_buf = bufs[cur]; sel_set (&sel, f, t); force_redraw (win_main); }
     }
-  else if (mb->button.data.clickselect) clear_selection ();
+  else if (mb->button.data.clickselect)
+    {
+      char addr[512];
+      window_state st;
+      Wimp_GetWindowState (win_main, &st);
+      if (mb->pos.x - (st.openblock.screenrect.min.x - st.openblock.scroll.x) >= TEXT_X && link_at (p, addr, sizeof addr)) open_url (addr);	/* a click on a web address opens it */
+      else clear_selection ();
+    }
   else if (mb->button.data.clickadjust && sel_buf == bufs[cur] && sel.active) { sel_extend (&sel, p); force_redraw (win_main); }
   Icon_SetCaret (win_input, ic_input);
   return TRUE;

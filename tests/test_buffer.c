@@ -105,8 +105,23 @@ static void test_nicks (void)
   CHECK (mentions ("caf\xc3\xa9: x", "caf\xc3\xa9")); CHECK (!mentions ("caf\xc3\xa9s", "caf"));	/* a UTF-8 letter continues a word */
 }
 
+static void test_format (void)
+{
+  buffer *b = buffer_new ("#f", BK_CHANNEL, 0);
+  b->layout_width = 1000;
+  buffer_add (b, 0, LK_TEXT, "bob", "a\x02" "bold\x02 \x03" "4red\x07", 0, 0, 0, measure, NULL);		/* formatting is kept as runs; the text is plain */
+  CHECK_STR (b->lines[0].text, "abold red"); CHECK_INT (b->lines[0].nruns, 3);
+  CHECK_INT (b->lines[0].nrows, 1);
+  buffer_add (b, 0, LK_TEXT, "amy", "no formatting here", 0, 0, 0, measure, NULL);
+  CHECK_STR (b->lines[1].text, "no formatting here"); CHECK_INT (b->lines[1].nruns, 0); CHECK (b->lines[1].runs == NULL);
+  buffer_add (b, 0, LK_INFO, NULL, "\x1B[2Jevil\x08\x08", 0, 0, 0, measure, NULL);			/* no control character gets to the Font Manager */
+  CHECK_STR (b->lines[2].text, "[2Jevil");
+  buffer_free (b);
+}
+
 int main (void)
 {
+  test_format ();
   test_wrap ();
   test_buffer ();
   test_nicks ();

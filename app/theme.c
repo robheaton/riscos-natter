@@ -15,7 +15,7 @@ static void light (palette *p)
 {
   static const unsigned nicks[NICK_COLOURS] = { 0xC0600000, 0x50A03000, 0x2020D000, 0x00A0D000, 0xA0306000, 0x80808000, 0xA0A00000, 0x20208000 };
   p->back = 0xFFFFFF00; p->text = 0x00000000; p->faded = 0x80808000; p->mention = 0xC0FFFF00; p->lists = 0xF0F0F000;
-  p->selected = 0xFFE8D000; p->error = 0x0000C800; p->marker = 0x2020D000; p->badge = 0xD0D0D000; p->query = 0x40802000;
+  p->selected = 0xFFE8D000; p->error = 0x0000C800; p->marker = 0x2020D000; p->badge = 0xD0D0D000; p->query = 0x40802000; p->link = 0xEE000000;
   memcpy (p->nick, nicks, sizeof p->nick);
 }
 
@@ -24,7 +24,7 @@ static void dark (palette *p)
   static const unsigned nicks_rgb[NICK_COLOURS] = { 0x5AA9FF, 0x4CD07D, 0xFF6B6B, 0xF0C040, 0xB58CFF, 0xA0A0A0, 0x40D0D0, 0xE08A5A };
   int i;
   p->back = colour_bgr (0x1E1E1E); p->text = colour_bgr (0xE0E0E0); p->faded = colour_bgr (0x8C8C8C); p->mention = colour_bgr (0x4A4420); p->lists = colour_bgr (0x2A2A2A);
-  p->selected = colour_bgr (0x36507A); p->error = colour_bgr (0xFF6B6B); p->marker = colour_bgr (0xFF5555); p->badge = colour_bgr (0x505050); p->query = colour_bgr (0x4CD07D);
+  p->selected = colour_bgr (0x36507A); p->error = colour_bgr (0xFF6B6B); p->marker = colour_bgr (0xFF5555); p->badge = colour_bgr (0x505050); p->query = colour_bgr (0x4CD07D); p->link = colour_bgr (0x6CB0FF);
   for (i = 0; i < NICK_COLOURS; i++) p->nick[i] = colour_bgr (nicks_rgb[i]);
 }
 

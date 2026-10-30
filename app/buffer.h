@@ -4,6 +4,7 @@
 #define NATTER_BUFFER_H
 
 #include <stddef.h>
+#include "format.h"
 
 enum { LK_TEXT, LK_ACTION, LK_NOTICE, LK_INFO, LK_JOIN, LK_PART, LK_QUIT, LK_NICK, LK_TOPIC, LK_MODE, LK_ERROR };
 enum { BK_STATUS, BK_CHANNEL, BK_QUERY };
@@ -22,6 +23,7 @@ typedef struct
   int self;			/* we said it */
   int width, nrows;		/* the width that the rows were made for (0: not laid out) and how many there are */
   unsigned *starts;		/* the byte offset in text where each row starts */
+  fmtrun *runs; size_t nruns;	/* the formatting of the text (bold, colours ...), if it had any: format.h */
 } bline;
 
 typedef struct buffer
@@ -45,7 +47,7 @@ typedef struct buffer
 
 buffer *buffer_new (const char *name, int kind, int network);
 void buffer_free (buffer *b);
-/* Adds a line, laid out for the current width.  Returns how many lines were dropped from the start (the row numbers of the other lines have shifted). */
+/* Adds a line, laid out for the current width.  The text may have IRC formatting codes: the line keeps the plain text and the runs of style; control characters are dropped.  Returns how many lines were dropped from the start (the row numbers of the other lines have shifted). */
 size_t buffer_add (buffer *b, long when, int kind, const char *nick, const char *text, int colour, int highlight, int self, measure_fn m, void *ud);
 void buffer_relayout (buffer *b, int width, measure_fn m, void *ud);	/* a new width: lay out all the lines again */
 size_t buffer_total_rows (const buffer *b);

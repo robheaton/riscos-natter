@@ -146,6 +146,8 @@ static const char *lines[][3] = {
   { "bob", "bob", "Got a minute? %ME%, I have a question about the module kit." },
   { "#riscosdev", "heather", "%ME%: did you see the thread on the forum?" },
   { "#riscos64", "carol", "\001is away for a while" },
+  { "#riscos64", "heather", "Formatting: \002bold\002, \035italic\035, \037underline\037, \00304red\003, \00312blue\003 and \0031,8black on yellow\003, \026reverse\026 and an escape \033[31m is just text" },
+  { "#riscos64", "bob", "Docs are at www.riscos.info and https://github.com/robheaton/riscos-natter (click them), thanks." },
 };
 #define NLINES ((unsigned) (sizeof lines / sizeof *lines))
 

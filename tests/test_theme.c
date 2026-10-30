@@ -38,7 +38,7 @@ int main (void)
   CHECK_HEX (p.back, 0xFFFFFF00); CHECK_HEX (p.text, 0); CHECK_HEX (p.mention, 0xC0FFFF00); CHECK_HEX (p.lists, 0xF0F0F000); CHECK_HEX (p.nick[0], 0xC0600000);
   s.theme = THEME_DARK; palette_make (&s, &p);
   CHECK_HEX (p.back, 0x1E1E1E00); CHECK_HEX (p.text, 0xE0E0E000);
-  CHECK (p.back != p.text && p.back != p.faded && p.back != p.lists);
+  CHECK (p.back != p.text && p.back != p.faded && p.back != p.lists && p.back != p.link && p.text != p.link);
   for (i = 0; i < NICK_COLOURS; i++)					/* a nick can be read on the background: the dark theme has no dark nick colours */
     {
       unsigned c = p.nick[i];
