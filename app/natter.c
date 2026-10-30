@@ -34,6 +34,8 @@
 #include "choices.h"
 #include "appearance.h"
 #include "theme.h"
+#include "select.h"
+#include "clip.h"
 
 /* ---- the geometry, in OS units ---- */
 static int font_pt = FONT_DEFAULT;	/* the size of the text, in points: the rows and the columns of the conversation grow with it (set_metrics) */
@@ -70,6 +72,9 @@ static palette pal;
 static int windows_made;			/* the windows exist: a change of appearance has something to redraw */
 static int want_bottom;				/* after the next layout, scroll to the newest line */
 static void apply_appearance (const settings *s);
+static void copy_selection (void);
+static int have_selection (void);
+static void paste_into_input (const char *text, void *ud);
 #define MAXHIST 64
 
 static window_handle win_main, win_topic, win_left, win_right, win_input;
@@ -82,6 +87,11 @@ static unsigned int fnorm_w, fbold_w, fital_w;
 static irc_conn *conn;
 static buffer *bufs[MAXBUF];
 static int nbufs, cur;
+static selection sel;				/* the selected text of the conversation sel_buf (select.h) */
+static buffer *sel_buf;
+static int selecting;				/* a drag that selects is going on */
+static selpos sel_last;				/* where the drag was when the window was last drawn */
+static unsigned scroll_tick;			/* the last time that the drag scrolled the window */
 static char nicklabel[48], inputbuf[512], titlebuf[96];
 static int layout_width;			/* the width of the text column that the current buffer is laid out for */
 static int win_width, main_h;			/* the visible width and height of the main window at the last check */
@@ -346,6 +356,7 @@ static void select_buffer (int i)
   LOG ("select buffer %d", i);
   if (i < 0 || i >= nbufs) return;
   old->new_marker = (int) old->n;
+  if (sel_buf != bufs[i]) { sel_clear (&sel); sel_buf = NULL; selecting = 0; }				/* the selection stays in its conversation */
   cur = i; b = bufs[cur];
   if (b->layout_width != layout_width) buffer_relayout (b, layout_width, measure_cb, NULL);
   if (!b->unread) b->new_marker = 0;					/* nothing new: no mark */
@@ -374,7 +385,8 @@ static void add_line (buffer *b, long when, int kind, const char *nick, const ch
   int colour = nick ? nick_colour (nick) : 0;
   int shown = (buffer_index (b) == cur);
   int follow = shown && main_at_bottom ();
-  buffer_add (b, when, kind, nick, text, colour, highlight, self, measure_cb, NULL);
+  size_t dropped = buffer_add (b, when, kind, nick, text, colour, highlight, self, measure_cb, NULL);
+  if (dropped && b == sel_buf) { sel_shift (&sel, dropped); if (!sel.active) sel_buf = NULL; }			/* the first lines were dropped */
   if (lg && !demo_active && log_enabled (b))
     {
       char t[1300];
@@ -722,6 +734,7 @@ static void drop_link (void)			/* the user ends the connection: nothing is tried
 static void clear_buffers (void)
 {
   int i;
+  sel_clear (&sel); sel_buf = NULL; selecting = 0;
   for (i = 1; i < nbufs; i++) { buffer_free (bufs[i]); bufs[i] = NULL; }
   nbufs = 1; cur = 0;
   nicks_dirty = 1;
@@ -953,6 +966,8 @@ static BOOL key_handler (event_pollblock *event, void *reference)
     {
     case 13: tabbing = 0; submit_input (); return TRUE;
     case 9: complete_nick (); return TRUE;
+    case 3: copy_selection (); return TRUE;					/* Ctrl-C */
+    case 22: clip_paste (win_input, ic_input, paste_into_input, NULL); return TRUE;	/* Ctrl-V */
     case 0x18F:								/* up arrow: the previous line that was typed */
       if (nhist) { if (hpos < 0) hpos = nhist; if (hpos > 0) hpos--; Icon_SetText (win_input, ic_input, history[hpos]); Icon_SetCaret (win_input, ic_input); }
       return TRUE;
@@ -993,13 +1008,18 @@ static void draw_scrollback (window_redrawblock *rb)
       int top, base, y0;
       const char *text; size_t from, to;
       char ts[16];
-      unsigned bg;
+      unsigned bg, pbg;
+      size_t sf = 0, st = 0;
+      int has_sel = 0, pre_sel = 0;
       if (row == first) { if (!buffer_find_row (b, (size_t) row, &line, &rowin)) break; }
       else if (++rowin >= b->lines[line].nrows) { line++; rowin = 0; }
       l = &b->lines[line];
       top = oy - TOP_H - row * LH; y0 = top - LH; base = y0 + font_pt;
       bg = l->highlight ? COL_BAND : COL_WHITE;
+      if (sel_buf == b) has_sel = sel_row (&sel, b, line, rowin, &sf, &st, &pre_sel);
+      pbg = pre_sel ? COL_SEL : bg;						/* the background of the time and the nick */
       if (l->highlight) fill (rb->rect.min.x + LEFT_EDGE, y0, right - rb->rect.min.x - LEFT_EDGE, LH, COL_BAND);
+      if (pre_sel) fill (ox + LEFT_EDGE + PAD, y0, TEXT_X - LEFT_EDGE - PAD, LH, COL_SEL);
       if (rowin == 0 && b->new_marker > 0 && (size_t) b->new_marker == line && (size_t) b->new_marker < b->n)	/* the mark of the new messages, above the first of them */
 	{
 	  fill (rb->rect.min.x + LEFT_EDGE, top - 1, right - rb->rect.min.x - LEFT_EDGE, 2, COL_MARK);
@@ -1007,21 +1027,37 @@ static void draw_scrollback (window_redrawblock *rb)
       if (rowin == 0)
 	{
 	  clock_text (l->when, ts, sizeof ts);
-	  paint (fnorm, COL_MUTED, bg, ox + LEFT_EDGE + PAD, base, ts, strlen (ts));
+	  paint (fnorm, COL_MUTED, pbg, ox + LEFT_EDGE + PAD, base, ts, strlen (ts));
 	  switch (l->kind)
 	    {
 	    case LK_TEXT: case LK_NOTICE:
-	      if (l->nick) { int w = bold_width (l->nick); paint (fbold, l->self ? nickcol[2] : nickcol[l->colour], bg, ox + LEFT_EDGE + PAD + TS_W + NICK_W - w, base, l->nick, strlen (l->nick)); }
+	      if (l->nick) { int w = bold_width (l->nick); paint (fbold, l->self ? nickcol[2] : nickcol[l->colour], pbg, ox + LEFT_EDGE + PAD + TS_W + NICK_W - w, base, l->nick, strlen (l->nick)); }
 	      break;
-	    case LK_ACTION: paint (fbold, nickcol[l->colour], bg, ox + LEFT_EDGE + PAD + TS_W + NICK_W - bold_width ("*"), base, "*", 1); break;
-	    case LK_JOIN: paint (fbold, COL_MUTED, bg, ox + LEFT_EDGE + PAD + TS_W + NICK_W - bold_width ("-->"), base, "-->", 3); break;
-	    case LK_PART: case LK_QUIT: paint (fbold, COL_MUTED, bg, ox + LEFT_EDGE + PAD + TS_W + NICK_W - bold_width ("<--"), base, "<--", 3); break;
-	    default: paint (fbold, COL_MUTED, bg, ox + LEFT_EDGE + PAD + TS_W + NICK_W - bold_width ("--"), base, "--", 2); break;
+	    case LK_ACTION: paint (fbold, nickcol[l->colour], pbg, ox + LEFT_EDGE + PAD + TS_W + NICK_W - bold_width ("*"), base, "*", 1); break;
+	    case LK_JOIN: paint (fbold, COL_MUTED, pbg, ox + LEFT_EDGE + PAD + TS_W + NICK_W - bold_width ("-->"), base, "-->", 3); break;
+	    case LK_PART: case LK_QUIT: paint (fbold, COL_MUTED, pbg, ox + LEFT_EDGE + PAD + TS_W + NICK_W - bold_width ("<--"), base, "<--", 3); break;
+	    default: paint (fbold, COL_MUTED, pbg, ox + LEFT_EDGE + PAD + TS_W + NICK_W - bold_width ("--"), base, "--", 2); break;
 	    }
 	}
       text = l->text; from = l->starts[rowin]; to = rowin + 1 < l->nrows ? l->starts[rowin + 1] : strlen (text);
       while (to > from && text[to - 1] == ' ') to--;
-      paint (l->kind == LK_ACTION ? fital : fnorm, l->kind == LK_ERROR ? COL_RED : (l->kind == LK_TEXT || l->kind == LK_ACTION || l->kind == LK_NOTICE || l->kind == LK_INFO) ? COL_TEXT : COL_MUTED, bg, ox + TEXT_X, base, text + from, to - from);
+      {
+	font_handle f = l->kind == LK_ACTION ? fital : fnorm;
+	unsigned fg = l->kind == LK_ERROR ? COL_RED : (l->kind == LK_TEXT || l->kind == LK_ACTION || l->kind == LK_NOTICE || l->kind == LK_INFO) ? COL_TEXT : COL_MUTED;
+	if (has_sel && sf < to && st > from)						/* the selected part of the row on its own background */
+	  {
+	    int italic = l->kind == LK_ACTION, x0 = ox + TEXT_X;
+	    int xs = x0 + (sf > from ? measure_cb (NULL, italic, text + from, sf - from) : 0);
+	    int xe = x0 + measure_cb (NULL, italic, text + from, (st < to ? st : to) - from);
+	    if (sf < from) sf = from;
+	    if (st > to) st = to;
+	    fill (xs, y0, xe - xs, LH, COL_SEL);
+	    if (sf > from) paint (f, fg, bg, x0, base, text + from, sf - from);
+	    paint (f, fg, COL_SEL, xs, base, text + sf, st - sf);
+	    if (st < to) paint (f, fg, bg, xe, base, text + st, to - st);
+	  }
+	else paint (f, fg, bg, ox + TEXT_X, base, text + from, to - from);
+      }
     }
 }
 
@@ -1224,6 +1260,7 @@ static void close_buffer (int i)
   if (i <= 0 || i >= nbufs) return;
   b = bufs[i];
   if (b->kind == BK_CHANNEL && b->joined) irc_part (conn, b->name, NULL);
+  if (b == sel_buf) { sel_clear (&sel); sel_buf = NULL; selecting = 0; }
   buffer_free (b);
   for (k = i; k < nbufs - 1; k++) bufs[k] = bufs[k + 1];
   nbufs--;
@@ -1241,7 +1278,7 @@ static void build_menus (void)
 {
   m_icon = Menu_New ("Natter", "Info,Networks,Choices...,Appearance...|Quit");
   Menu_AddSubWindow (m_icon, 0, info_window_create ());						/* Info: the standard program information box */
-  m_chan = Menu_New ("Conversation", "Join channel...,Part channel,Topic...|Log this conversation,Open log|Close conversation");
+  m_chan = Menu_New ("Conversation", "Copy selection|Join channel...,Part channel,Topic...|Log this conversation,Open log|Close conversation");
   m_nick = Menu_New ("Person", "Talk to,Who is|Give op,Take op,Give voice,Take voice|Kick,Ban|Insert in line");
 }
 
@@ -1263,11 +1300,12 @@ static void show_chan_menu (int bufidx, int x, int y)
   buffer *b = bufs[bufidx];
   int chan = b->kind == BK_CHANNEL;
   menu_buf = bufidx;
-  Menu_SetFlags (m_chan, 0, 0, 0);
-  Menu_SetFlags (m_chan, 1, 0, chan ? 0 : 1);
+  Menu_SetFlags (m_chan, 0, 0, have_selection () ? 0 : 1);
+  Menu_SetFlags (m_chan, 1, 0, 0);
   Menu_SetFlags (m_chan, 2, 0, chan ? 0 : 1);
-  Menu_SetFlags (m_chan, 3, log_enabled (b), 0);
-  Menu_SetFlags (m_chan, 5, 0, bufidx == 0 ? 1 : 0);
+  Menu_SetFlags (m_chan, 3, 0, chan ? 0 : 1);
+  Menu_SetFlags (m_chan, 4, log_enabled (b), 0);
+  Menu_SetFlags (m_chan, 6, 0, bufidx == 0 ? 1 : 0);
   shown = m_chan;
   Menu_Show (m_chan, x - 64, y);
 }
@@ -1316,12 +1354,13 @@ static BOOL menu_handler (event_pollblock *event, void *reference)
       buffer *b = bufs[menu_buf];
       switch (sel[0])
 	{
-	case 0: put_in_input ("/join #"); break;
-	case 1: if (b->kind == BK_CHANNEL) irc_part (conn, b->name, NULL); break;
-	case 2: { char t[400]; snprintf (t, sizeof t, "/topic %s", b->topic ? b->topic : ""); put_in_input (t); } break;
-	case 3: b->log = !log_enabled (b); status_line (LK_INFO, "Logging of %s is %s", b->name, b->log ? "on" : "off"); break;
-	case 4: open_log_file (b); break;
-	case 5: close_buffer (menu_buf); break;
+	case 0: copy_selection (); break;
+	case 1: put_in_input ("/join #"); break;
+	case 2: if (b->kind == BK_CHANNEL) irc_part (conn, b->name, NULL); break;
+	case 3: { char t[400]; snprintf (t, sizeof t, "/topic %s", b->topic ? b->topic : ""); put_in_input (t); } break;
+	case 4: b->log = !log_enabled (b); status_line (LK_INFO, "Logging of %s is %s", b->name, b->log ? "on" : "off"); break;
+	case 5: open_log_file (b); break;
+	case 6: close_buffer (menu_buf); break;
 	}
     }
   else if (shown == m_nick && menu_nick[0])
@@ -1340,6 +1379,129 @@ static BOOL menu_handler (event_pollblock *event, void *reference)
 	}
     }
   pump_output ();
+  return TRUE;
+}
+
+/* ---- selecting and copying text in the conversation ---- */
+
+static void clear_selection (void)
+{
+  int was = sel_buf && !sel_empty (&sel);
+  sel_clear (&sel); sel_buf = NULL; selecting = 0;
+  if (was) force_redraw (win_main);
+}
+
+/* the place in the text of the current conversation at a point of the screen */
+static selpos point_to_pos (int x, int y)
+{
+  window_state st;
+  int wx, wy, row;
+  Wimp_GetWindowState (win_main, &st);
+  wx = x - (st.openblock.screenrect.min.x - st.openblock.scroll.x);
+  wy = (st.openblock.screenrect.max.y - st.openblock.scroll.y) - y;		/* down from the top of the work area */
+  row = wy < TOP_H ? -1 : (wy - TOP_H) / LH;
+  return sel_hit (bufs[cur], row, wx - TEXT_X, measure_cb, NULL);
+}
+
+static void copy_selection (void)
+{
+  char *t;
+  if (!sel_buf || buffer_index (sel_buf) < 0 || sel_empty (&sel)) return;
+  t = sel_text (sel_buf, &sel, clock_text);
+  if (t) { clip_set (t); free (t); }
+}
+
+static int have_selection (void) { return sel_buf && buffer_index (sel_buf) >= 0 && !sel_empty (&sel); }
+
+static void paste_into_input (const char *text, void *ud)
+{
+  char line[512], ins[512];
+  size_t n = 0, at, room;
+  caret_block caret;
+  const char *p;
+  (void) ud;
+  for (p = text; *p && n < sizeof ins - 1; p++)					/* one line: a line break or a tab is a space, other controls go */
+    {
+      unsigned char c = (unsigned char) *p;
+      if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+      if (c < 32 || c == 127) continue;
+      ins[n++] = (char) c;
+    }
+  ins[n] = 0;
+  Icon_GetText (win_input, ic_input, line);
+  Wimp_GetCaretPosition (&caret);
+  at = caret.window == win_input && caret.icon == ic_input && caret.index >= 0 && (size_t) caret.index <= strlen (line) ? (size_t) caret.index : strlen (line);
+  room = sizeof line - 1 - strlen (line);
+  if (n > room) n = room;
+  memmove (line + at + n, line + at, strlen (line + at) + 1);
+  memcpy (line + at, ins, n);
+  Icon_SetText (win_input, ic_input, line);
+  Icon_SetCaret (win_input, ic_input);
+}
+
+static void scroll_main_by (int dy)
+{
+  window_state st;
+  int least;
+  Wimp_GetWindowState (win_main, &st);
+  st.openblock.scroll.y += dy;
+  least = content_height () > main_h ? main_h - content_height () : 0;
+  if (st.openblock.scroll.y < least) st.openblock.scroll.y = least;
+  if (st.openblock.scroll.y > 0) st.openblock.scroll.y = 0;
+  Wimp_OpenWindow (&st.openblock);
+}
+
+/* While the button is down: the end of the selection follows the pointer, and the window scrolls when the pointer is above or below the text */
+static void select_drag_update (void)
+{
+  mouse_block mb;
+  window_state st;
+  selpos p;
+  int top, bottom, y;
+  Wimp_GetPointerInfo (&mb);
+  Wimp_GetWindowState (win_main, &st);
+  top = st.openblock.screenrect.max.y - TOP_H; bottom = st.openblock.screenrect.min.y + BOT_H;
+  y = mb.pos.y;
+  if (y > top || y < bottom)
+    {
+      unsigned now = Time_Monotonic ();
+      if ((int) (now - scroll_tick) >= 4)
+	{
+	  int far = y > top ? y - top : bottom - y;
+	  int step = LH / 4 + far / 4;
+	  scroll_tick = now;
+	  scroll_main_by (y > top ? step : -step);
+	}
+      y = y > top ? top - 1 : bottom + 1;
+    }
+  p = point_to_pos (mb.pos.x, y);
+  if (p.line != sel_last.line || p.off != sel_last.off || y != mb.pos.y)
+    {
+      sel_last = p;
+      sel_extend (&sel, p);
+      force_redraw (win_main);
+    }
+}
+
+static void start_select_drag (void)
+{
+  drag_block db;
+  mouse_block mb;
+  Wimp_GetPointerInfo (&mb);
+  memset (&db, 0, sizeof db);
+  db.window = win_main; db.type = drag_INVISIBLE;
+  db.screenrect.min.x = db.screenrect.max.x = mb.pos.x; db.screenrect.min.y = db.screenrect.max.y = mb.pos.y;
+  db.parent.min.x = 0; db.parent.min.y = 0; db.parent.max.x = 16384; db.parent.max.y = 16384;
+  Wimp_DragBox (&db);
+  selecting = 1; scroll_tick = Time_Monotonic ();
+}
+
+static BOOL drag_ended (event_pollblock *event, void *reference)
+{
+  (void) event; (void) reference;
+  if (!selecting) return FALSE;
+  select_drag_update ();
+  selecting = 0;
   return TRUE;
 }
 
@@ -1376,6 +1538,38 @@ static BOOL right_click (event_pollblock *event, void *reference)
       const char *nk = nicks[row].user->nick;
       if (irc_conn_casecmp (conn, nk, irc_conn_nick (conn))) select_buffer (buffer_index (get_buffer (nk, BK_QUERY)));
     }
+  Icon_SetCaret (win_input, ic_input);
+  return TRUE;
+}
+
+/* the conversation: drag to select, double click to select a word, Adjust to extend, a click to let go; Menu is the menu of the conversation */
+static BOOL main_click (event_pollblock *event, void *reference)
+{
+  mouse_block *mb = &event->data.mouse;
+  selpos p;
+  (void) reference;
+  if (mb->button.data.menu) { show_chan_menu (cur, mb->pos.x, mb->pos.y); return TRUE; }
+  p = point_to_pos (mb->pos.x, mb->pos.y);
+  if (mb->button.data.dragselect)
+    {
+      sel_buf = bufs[cur]; sel_set (&sel, p, p); sel_last = p;
+      start_select_drag ();
+      force_redraw (win_main);
+    }
+  else if (mb->button.data.dragadjust)
+    {
+      if (sel_buf != bufs[cur] || !sel.active) { sel_buf = bufs[cur]; sel_set (&sel, p, p); } else sel_extend (&sel, p);
+      sel_last = p;
+      start_select_drag ();
+      force_redraw (win_main);
+    }
+  else if (mb->button.data.select)							/* a double click */
+    {
+      selpos f, t;
+      if (sel_word (bufs[cur], p, &f, &t)) { sel_buf = bufs[cur]; sel_set (&sel, f, t); force_redraw (win_main); }
+    }
+  else if (mb->button.data.clickselect) clear_selection ();
+  else if (mb->button.data.clickadjust && sel_buf == bufs[cur] && sel.active) { sel_extend (&sel, p); force_redraw (win_main); }
   Icon_SetCaret (win_input, ic_input);
   return TRUE;
 }
@@ -1440,6 +1634,7 @@ static BOOL null_handler (event_pollblock *event, void *reference)
   unsigned now = Time_Monotonic ();
   window_state st;
   (void) event; (void) reference;
+  if (selecting) select_drag_update ();
   if (demo_active) demo_tick (now);
   if (srvlink) { net_poll (srvlink); if (link_closed) { net_free (srvlink); srvlink = NULL; link_closed = 0; } }
   if (reconnect_at && !srvlink && (int) (now - reconnect_at) >= 0)
@@ -1549,7 +1744,7 @@ static void make_windows (void)
 {
   wimp_point off, size;
   icon_createblock ic;
-  win_main = make_window (80, 120, 1480, 860, 0xBF000002u, 255, 1400, 600, titlebuf, MIN_W, 400, 3);	/* vertical scroll bar, size box, title bar with indirected text; not redrawn by the Wimp */
+  win_main = make_window (80, 120, 1480, 860, 0xBF000002u, 255, 1400, 600, titlebuf, MIN_W, 400, 10);	/* vertical scroll bar, size box, title bar with indirected text; not redrawn by the Wimp */
   Pane2_AddMain (win_main);
   /* the panes: flags 0x90000000 is a window with a vertical scroll bar and nothing else, 0x80000000 one with nothing: neither can be moved */
   win_left = make_window (80, 120, 80 + LEFT_W, 700, 0x90000000u | 0x20u, 255, LEFT_W, 600, "", 20, 20, 3);
@@ -1626,7 +1821,8 @@ int main (void)
   Event_Claim (event_REDRAW, win_right, event_ANY, right_redraw, NULL);
   Event_Claim (event_REDRAW, win_topic, event_ANY, topic_redraw, NULL);
   Event_Claim (event_CLICK, win_left, event_ANY, left_click, NULL);
-  Event_Claim (event_CLICK, win_main, event_ANY, focus_click, NULL);
+  Event_Claim (event_CLICK, win_main, event_ANY, main_click, NULL);
+  Event_Claim (event_USERDRAG, event_ANY, event_ANY, drag_ended, NULL);
   Event_Claim (event_CLICK, win_right, event_ANY, right_click, NULL);
   Event_Claim (event_CLICK, win_topic, event_ANY, focus_click, NULL);
   Event_Claim (event_OPEN, win_left, event_ANY, Handler_OpenWindow, NULL);
@@ -1637,6 +1833,7 @@ int main (void)
   Event_Claim (event_CLOSE, win_main, event_ANY, close_handler, NULL);
   Event_Claim (event_NULL, event_ANY, event_ANY, null_handler, NULL);
   build_menus ();
+  clip_init ();
   choices_init (&ch_callbacks);
   appearance_init (&ap_callbacks);
   make_bar_icon ();
