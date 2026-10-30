@@ -28,7 +28,7 @@ window_handle dlg_window (int x, int y, int w, int h, const char *title, int own
   wb.colours.cols.titlefore = 7; wb.colours.cols.titleback = 2; wb.colours.cols.workfore = 7; wb.colours.cols.workback = 1;
   wb.colours.cols.scrollouter = 3; wb.colours.cols.scrollinner = 1; wb.colours.cols.titlefocus = 12;
   wb.workarearect.min.x = 0; wb.workarearect.max.x = w; wb.workarearect.max.y = 0; wb.workarearect.min.y = -h;
-  wb.titleflags.value = 0x19; wb.workflags.value = 0;
+  wb.titleflags.value = 0x19; wb.workflags.value = own_redraw ? (3u << 12) : 0;	/* a window that draws things of its own gets the clicks on its background too (icon -1) */
   wb.spritearea = 1;
   wb.minsize.x = 100; wb.minsize.y = 100;
   strncpy (wb.title.text, title, 11);

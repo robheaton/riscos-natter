@@ -20,7 +20,7 @@ extern void natter_log (const char *fmt, ...);
 #define LBL_W 250
 #define FLD_X 284
 #define FLD_R (W - 30)
-#define SW_W 90					/* the swatch: a button that shows the colour and opens the colour picker */
+#define SW_W 90					/* the swatch: painted by redraw_handler (no icon under it); a click on it opens the colour picker */
 #define HEX_X (FLD_X + SW_W + 16)		/* the six digits of the colour, to type */
 #define HEX_W 150
 #define NOTE_X (HEX_X + HEX_W + 20)
@@ -49,7 +49,7 @@ static const appearance_callbacks *cb;
 static window_handle win;
 static settings ed, start;			/* the copy that is being edited, and what it was when the window was opened */
 
-static char t_size[4], t_col[NCOLOURS][8], t_sw[NCOLOURS][2];
+static char t_size[4], t_col[NCOLOURS][8];
 static char l_size[] = "Text size", l_points[] = "points (8 to 16)", l_theme[] = "Theme", l_light[] = "Light", l_dark[] = "Dark";
 static char l_cancel[] = "Cancel", l_apply[] = "Apply", l_save[] = "Save";
 static char l_hint1[] = "Click a colour to choose it, or type six hex digits (red, green, blue).";
@@ -58,7 +58,7 @@ static char v_num[] = "A0-9", v_hex[] = "A0-9A-Fa-f", v_radio[] = "Sradiooff,rad
 static const char *const col_names[NCOLOURS] = { "Background", "Text", "Faded text", "Mentions", "Lists" };
 static const char *const col_notes[NCOLOURS] = { "behind the conversation", "what people say", "times, joins and parts", "lines that name you", "buffer list and nick list" };
 
-static icon_handle i_size, i_light, i_dark, i_col[NCOLOURS], i_sw[NCOLOURS], i_cancel, i_apply, i_save;
+static icon_handle i_size, i_light, i_dark, i_col[NCOLOURS], i_cancel, i_apply, i_save;
 static icon_handle order[1 + NCOLOURS];			/* the writable fields in the order of the Tab key */
 static int norder;
 static unsigned swatch[NCOLOURS];			/* the colour that each swatch shows (0xBBGGRR00) */
@@ -81,7 +81,7 @@ static void copy (char *dst, size_t size, const char *src) { snprintf (dst, size
 
 /* ---- the colours of the swatches ---- */
 
-/* The swatch is painted by redraw_handler over its button: the Wimp has to ask for it (Wimp_ForceRedraw); redrawing the icon itself would plot the plain button over the colour. */
+/* The swatch is painted by redraw_handler: the Wimp has to ask for it (Wimp_ForceRedraw). */
 static void redraw_swatch (int k)
 {
   window_redrawblock rb;
@@ -228,16 +228,22 @@ static BOOL redraw_handler (event_pollblock *event, void *reference)
 {
   window_redrawblock rb;
   BOOL more;
+  static int calls;
   (void) reference;
   rb.window = event->data.openblock.window;
   Wimp_RedrawWindow (&rb, &more);
+  if (calls < 6) natter_log ("appearance redraw %d: window %d rect %d,%d to %d,%d scroll %d,%d clip %d,%d to %d,%d swatches %08x %08x %08x", ++calls, (int) rb.window, rb.rect.min.x, rb.rect.min.y, rb.rect.max.x, rb.rect.max.y,
+	      rb.scroll.x, rb.scroll.y, rb.cliprect.min.x, rb.cliprect.min.y, rb.cliprect.max.x, rb.cliprect.max.y, swatch[0], swatch[1], swatch[2]);
   while (more)
     {
       int ox = rb.rect.min.x - rb.scroll.x, oy = rb.rect.max.y - rb.scroll.y, k;
-      for (k = 0; k < NCOLOURS; k++)						/* the colour inside the border of each swatch button */
+      for (k = 0; k < NCOLOURS; k++)						/* a black frame and the colour inside it */
 	{
+	  int x = ox + FLD_X, y = oy + rowtop (FIRST_COLOUR_ROW + k) - 44;
+	  ColourTrans_SetGCOL (0x00000000, 0, 0);
+	  GFX_RectangleFill (x, y, SW_W, 40);
 	  ColourTrans_SetGCOL (swatch[k], 0, 0);
-	  GFX_RectangleFill (ox + FLD_X + 6, oy + rowtop (FIRST_COLOUR_ROW + k) - 44 + 6, SW_W - 12, 28);
+	  GFX_RectangleFill (x + 3, y + 3, SW_W - 6, 34);
 	}
       Wimp_GetRectangle (&rb, &more);
     }
@@ -256,7 +262,17 @@ static BOOL click_handler (event_pollblock *event, void *reference)
   icon_handle i = event->data.mouse.icon;
   int k;
   (void) reference;
-  for (k = 0; k < NCOLOURS; k++) if (i == i_sw[k]) { open_picker (k); redraw_swatch (k); return TRUE; }
+  if (i == -1)									/* the background of the window: is it a swatch? */
+    {
+      window_state st;
+      int wx, wy;
+      Wimp_GetWindowState (win, &st);
+      wx = event->data.mouse.pos.x - (st.openblock.screenrect.min.x - st.openblock.scroll.x);
+      wy = event->data.mouse.pos.y - (st.openblock.screenrect.max.y - st.openblock.scroll.y);
+      for (k = 0; k < NCOLOURS; k++)
+	if (wx >= FLD_X && wx < FLD_X + SW_W && wy >= rowtop (FIRST_COLOUR_ROW + k) - 44 && wy < rowtop (FIRST_COLOUR_ROW + k) - 4) { open_picker (k); return TRUE; }
+      return TRUE;
+    }
   if (i == i_light || i == i_dark)
     {
       int pt = atoi (Icon_GetTextPtr (win, i_size));
@@ -314,8 +330,6 @@ void appearance_init (const appearance_callbacks *callbacks)
       copy (names[i], sizeof names[i], col_names[i]);
       copy (notes[i], sizeof notes[i], col_notes[i]);
       label (r, names[i]);
-      t_sw[i][0] = 0;
-      i_sw[i] = mk (FLD_X, r, FLD_X + SW_W, F_BUTTON, t_sw[i], sizeof t_sw[i], NULL);
       i_col[i] = field (r, HEX_X, HEX_X + HEX_W, t_col[i], sizeof t_col[i], v_hex);
       mk (NOTE_X, r, FLD_R, F_LABEL, notes[i], strlen (notes[i]) + 1, NULL);
       r++;
