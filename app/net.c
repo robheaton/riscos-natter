@@ -16,22 +16,26 @@
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 #include "net.h"
+#ifdef __riscos__
+#include "kernel.h"
+#endif
 
 #define OUT_MAX 65536			/* the most that is queued for sending */
 #define CONNECT_SECONDS 30		/* a connection or handshake that takes longer than this has failed */
 #define READ_CHUNK 8192
 #define READS_PER_POLL 8
 
-enum { S_CONNECTING, S_HANDSHAKE, S_OPEN, S_DONE };
+enum { S_RESOLVING, S_CONNECTING, S_HANDSHAKE, S_OPEN, S_DONE };
 
 struct net
 {
-  int fd, state, tls, verify;
+  int fd, state, tls, verify, port;
   SSL_CTX *ctx; SSL *ssl;
   struct addrinfo *res, *cur;
   char *host, *cafile;
   net_events ev; void *ud;
   time_t started;
+  long last_ms;							/* when the lookup of the name was last asked (S_RESOLVING) */
   char *out; size_t outlen, outcap;
 };
 
@@ -95,6 +99,55 @@ static int try_next_address (net *n)
   return -1;
 }
 
+#ifdef __riscos__
+/* ---- the lookup of the name, in steps ----
+   getaddrinfo waits for the answer of the name server, and the desktop with it.  The Resolver module (Resolver_GetHost, SWI 0x46001) can be asked again and again instead: it answers 36
+   (EINPROGRESS) until it knows, then a hostent (the layout of the 64-bit Resolver: 32-bit pointers).  Checked on a Pi 5: about a quarter of a second for a name that is not in its cache. */
+
+enum { R_PENDING, R_DONE, R_FAIL, R_NONE };
+
+static long now_ms (void) { struct timespec t; clock_gettime (CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000L; }
+
+static int resolver_step (net *n)
+{
+  static char name[256];						/* the Resolver reads it: an address below 4 GB */
+  _kernel_swi_regs in, out;
+  _kernel_oserror *e;
+  const unsigned int *h, *list;
+  struct addrinfo **tail = &n->res;
+  int i;
+  snprintf (name, sizeof name, "%s", n->host);
+  memset (&in, 0, sizeof in);
+  in.r[0] = (int) (unsigned long) name;
+  e = _kernel_swi (0x46001 | 0x20000, &in, &out);
+  if (e) return R_NONE;							/* no Resolver: the caller uses getaddrinfo */
+  if (out.r[0] == 36) return R_PENDING;
+  if (out.r[0] != 0 || !out.r[1]) return R_FAIL;
+  h = (const unsigned int *) (unsigned long) (unsigned) out.r[1];
+  if ((int) h[2] != AF_INET || h[3] != 4) return R_FAIL;
+  list = (const unsigned int *) (unsigned long) h[4];
+  for (i = 0; list && list[i] && i < 8; i++)
+    {
+      struct addrinfo *ai = calloc (1, sizeof *ai);
+      struct sockaddr_in *sin = calloc (1, sizeof *sin);
+      if (!ai || !sin) { free (ai); free (sin); break; }
+      sin->sin_family = AF_INET; sin->sin_port = htons ((unsigned short) n->port);
+      memcpy (&sin->sin_addr, (const void *) (unsigned long) list[i], 4);
+      ai->ai_family = AF_INET; ai->ai_socktype = SOCK_STREAM; ai->ai_protocol = 6; ai->ai_addrlen = sizeof *sin; ai->ai_addr = (struct sockaddr *) sin;
+      *tail = ai; tail = &ai->ai_next;
+    }
+  return n->res ? R_DONE : R_FAIL;
+}
+
+/* the addresses are known: start on the first of them */
+static void addresses_ready (net *n)
+{
+  n->cur = n->res;
+  if (try_next_address (n) < 0) finish (n, "Could not connect to any address of the server");
+}
+#endif
+
+
 static int start_tls (net *n)
 {
   struct in6_addr a6; struct in_addr a4;
@@ -132,15 +185,25 @@ net *net_open (const char *host, int port, int tls, const char *cafile, int veri
   char portstr[16];
   int rc;
   if (!n) return NULL;
-  n->fd = -1; n->tls = tls; n->verify = verify; n->ev = *ev; n->ud = ud;
+  n->fd = -1; n->tls = tls; n->verify = verify; n->port = port; n->ev = *ev; n->ud = ud;
   n->host = strdup (host); n->cafile = cafile ? strdup (cafile) : NULL;
 #ifdef SIGPIPE
   signal (SIGPIPE, SIG_IGN);
 #endif
+  say (n, "Looking up %s", host);
+#ifdef __riscos__
+  {
+    struct in_addr a4;
+    if (inet_pton (AF_INET, host, &a4) != 1)				/* a name: the lookup goes on in net_poll, and nothing waits for it */
+      {
+	n->state = S_RESOLVING; n->started = time (NULL); n->last_ms = 0;
+	return n;
+      }
+  }
+#endif
   memset (&hints, 0, sizeof hints);
   hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
   snprintf (portstr, sizeof portstr, "%d", port);
-  say (n, "Looking up %s", host);
   rc = getaddrinfo (host, portstr, &hints, &n->res);
   if (rc != 0)
     {
@@ -235,6 +298,35 @@ void net_poll (net *n)
   if (!n || n->state == S_DONE) return;
   switch (n->state)
     {
+    case S_RESOLVING:
+#ifdef __riscos__
+      {
+	long t = now_ms ();
+	int r;
+	if (n->last_ms && t - n->last_ms < 40) break;				/* ask a few times a second: the answer is a quarter of a second away */
+	n->last_ms = t ? t : 1;
+	r = resolver_step (n);
+	if (r == R_DONE) addresses_ready (n);
+	else if (r == R_PENDING)
+	  {
+	    if (time (NULL) - n->started > 20) { char why[200]; snprintf (why, sizeof why, "Could not find %s: the name server did not answer", n->host); finish (n, why); }
+	  }
+	else if (r == R_FAIL) { char why[200]; snprintf (why, sizeof why, "Could not find %s", n->host); finish (n, why); }
+	else									/* no Resolver module: wait for getaddrinfo, as before */
+	  {
+	    struct addrinfo hints;
+	    char portstr[16];
+	    int rc;
+	    memset (&hints, 0, sizeof hints);
+	    hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
+	    snprintf (portstr, sizeof portstr, "%d", n->port);
+	    rc = getaddrinfo (n->host, portstr, &hints, &n->res);
+	    if (rc != 0) { char why[200]; snprintf (why, sizeof why, "Could not find %s: %s", n->host, gai_strerror (rc)); finish (n, why); }
+	    else addresses_ready (n);
+	  }
+      }
+#endif
+      break;
     case S_CONNECTING:
       {
 	fd_set w;
