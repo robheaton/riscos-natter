@@ -26,6 +26,10 @@ Start `!Natter`: it puts an icon on the icon bar (Menu: Info, Networks, Choices.
 
 ## Not done yet
 
-IRC colour codes, links you can click, a beep for mentions, looking up a name without stopping the desktop for a moment, several networks at once, a Licence.
+several networks at once.
+
+## Licence
+
+Natter is under the **Zero-Clause BSD** licence (`LICENCE`): use it, copy it, change it and share it for any purpose, with no conditions. The compiled program also contains DeskLib, OpenSSL, a list of root certificates and the C library of the tool chain, which keep their own licences: `NOTICE.md` says which, and what a copy of the program has to say about them.
 
 64-bit only. Built with the [riscos-gcc16](https://github.com/robheaton/riscos-gcc16) RISC OS 64 tool chain, DeskLib64 and OpenSSL.
