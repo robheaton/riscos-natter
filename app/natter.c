@@ -1008,7 +1008,20 @@ static BOOL key_handler (event_pollblock *event, void *reference)
 
 /* ---- the text of a row: in pieces of one style ---- */
 
-static unsigned luminance (unsigned bgr) { return (((bgr >> 8) & 0xFF) * 299 + ((bgr >> 16) & 0xFF) * 587 + ((bgr >> 24) & 0xFF) * 114) / 1000; }	/* 0xBBGGRR00: 0 to 255 */
+/* how bright a colour (0xBBGGRR00) is to the eye, 0.0 to 1.0 (the sRGB weights, with a gamma of 2.2) */
+static double rel_luminance (unsigned bgr)
+{
+  double r = (double) ((bgr >> 8) & 0xFF) / 255.0, g = (double) ((bgr >> 16) & 0xFF) / 255.0, b = (double) ((bgr >> 24) & 0xFF) / 255.0;
+  r = r * r * (0.2 + 0.8 * r) ; g = g * g * (0.2 + 0.8 * g); b = b * b * (0.2 + 0.8 * b);		/* about x to the power 2.2 */
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/* the contrast of two colours as a ratio: 1 (the same) to 21 (black on white) */
+static double contrast (unsigned a, unsigned b)
+{
+  double la = rel_luminance (a) + 0.05, lb = rel_luminance (b) + 0.05;
+  return la > lb ? la / lb : lb / la;
+}
 
 static unsigned fmt_colour (int c, unsigned def)
 {
@@ -1050,7 +1063,8 @@ static void paint_row_text (const bline *l, size_t from, size_t to, int has_sel,
       if (sty.flags & FMT_REVERSE) { unsigned t = fg; fg = hasbg ? bgc : bg; bgc = t; hasbg = 1; }
       bgcol = selected ? COL_SEL : hasbg ? bgc : bg;
       if (in_link) fg = pal.link;
-      if ((int) luminance (fg) - (int) luminance (bgcol) < 60 && (int) luminance (bgcol) - (int) luminance (fg) < 60) fg = luminance (bgcol) > 140 ? 0x00000000 : 0xFFFFFF00;	/* it can be read */
+      if (contrast (fg, bgcol) < 2.2)								/* it cannot be read on this background: the usual colour of the text, or black or white */
+	fg = contrast (fg0, bgcol) >= 2.2 ? fg0 : rel_luminance (bgcol) > 0.3 ? 0x00000000 : 0xFFFFFF00;
       f = (sty.flags & FMT_BOLD) ? fbold : ((sty.flags & FMT_ITALIC) || l->kind == LK_ACTION) ? fital : fnorm;
       w = font_width (f, text + a, b - a);
       if (selected || hasbg) fill (x, y0, w, LH, bgcol);
