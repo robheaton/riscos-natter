@@ -128,6 +128,8 @@ void demo_from_client (const char *line)
 
 static const char *lines[][3] = {
   /* channel, sender, text; a text that starts with "\001" is an action, "+" "-" are a join or quit, "!" a nick change, "~" a topic */
+  { "#riscos64", "heather", "Formatting: \002bold\002, \035italic\035, \037underline\037, \00304red\003, \00312blue\003 and \0031,8black on yellow\003, \026reverse\026 and an escape \033[31m is just text" },
+  { "#riscos64", "bob", "Docs are at www.riscos.info and https://github.com/robheaton/riscos-natter (click them), thanks." },
   { "#riscos64", "alice", "Has anyone tried the native compiler on the Pi 5?" },
   { "#riscos64", "bob", "Yes, zlib builds in about a minute." },
   { "#riscos64", "dave", "\001waves and reads the scrollback" },
@@ -146,8 +148,6 @@ static const char *lines[][3] = {
   { "bob", "bob", "Got a minute? %ME%, I have a question about the module kit." },
   { "#riscosdev", "heather", "%ME%: did you see the thread on the forum?" },
   { "#riscos64", "carol", "\001is away for a while" },
-  { "#riscos64", "heather", "Formatting: \002bold\002, \035italic\035, \037underline\037, \00304red\003, \00312blue\003 and \0031,8black on yellow\003, \026reverse\026 and an escape \033[31m is just text" },
-  { "#riscos64", "bob", "Docs are at www.riscos.info and https://github.com/robheaton/riscos-natter (click them), thanks." },
 };
 #define NLINES ((unsigned) (sizeof lines / sizeof *lines))
 
