@@ -2,11 +2,12 @@
 """mksprites.py OUT_SPRITE_FILE [OUT_PREVIEW_PNG]: makes the sprite file of Natter (the icon of the application and of the icon bar): a speech bubble, in two forms:
    !natter     the bubble
    natterhl    the bubble with a red mark (for the icon bar when something mentions you)
+   natterbig   the bubble twice as big (for the information window)
 32 bits a pixel with a mask, 68 x 68 pixels at 180 dots an inch (so it is drawn 34 pixels wide in a mode of 90 dots an inch).  Drawn at 4 times the size and reduced: the mask is on or off,
 the colour at the edge is the colour of the bubble.  Only the standard library is needed (the preview PNG is written by hand)."""
 import struct, sys, zlib
 
-N = 68          # pixels
+N = 68          # pixels of the small sprites (the drawing is 68 units wide; a bigger sprite scales it)
 SS = 4          # drawing scale
 DPI = 180
 
@@ -43,21 +44,23 @@ def sample(x, y, hl):
         return (255, 255, 255)
     return (235, 245, 255)                                    # the inside
 
-def render(hl):
-    pix = [[None] * N for _ in range(N)]
-    for py in range(N):
-        for px in range(N):
+def render(hl, n=N):
+    sc = n / 68.0
+    pix = [[None] * n for _ in range(n)]
+    for py in range(n):
+        for px in range(n):
             acc = []
             for sy in range(SS):
                 for sx in range(SS):
-                    c = sample(px + (sx + 0.5) / SS, py + (sy + 0.5) / SS, hl)
+                    c = sample((px + (sx + 0.5) / SS) / sc, (py + (sy + 0.5) / SS) / sc, hl)
                     if c: acc.append(c)
             if len(acc) * 2 >= SS * SS:                       # the mask: more than half covered
                 pix[py][px] = tuple(sum(c[i] for c in acc) // len(acc) for i in range(3))
     # the red mark is drawn over the outline too
     return pix
 
-def sprite_block(name, pix):
+def sprite_block(name, pix, n=N):
+    N = n
     mode = 1 | (DPI << 1) | (DPI << 14) | (6 << 27)           # new format, 32 bits a pixel
     image = bytearray()
     for py in range(N):                                       # a sprite is stored from the top row down
@@ -92,8 +95,9 @@ def png(path, pix):
 
 def main():
     a, b = render(False), render(True)
-    blocks = sprite_block("!natter", a) + sprite_block("natterhl", b)
-    area = struct.pack("<III", 2, 16, 16 + len(blocks)) + blocks
+    big = render(False, 136)
+    blocks = sprite_block("!natter", a) + sprite_block("natterhl", b) + sprite_block("natterbig", big, 136)
+    area = struct.pack("<III", 3, 16, 16 + len(blocks)) + blocks
     open(sys.argv[1], "wb").write(area)
     if len(sys.argv) > 2:
         wide = [ra + rb for ra, rb in zip(a, b)]

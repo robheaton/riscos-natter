@@ -3,6 +3,7 @@
 #ifndef NATTER_CHOICES_H
 #define NATTER_CHOICES_H
 
+#include "DeskLib:Window.h"
 #include "settings.h"
 
 typedef struct
@@ -16,5 +17,8 @@ void choices_init (const choices_callbacks *cb);		/* creates the window (not sho
 /* Shows the window, editing a copy of s, with network number select picked (-1: the first).  If it is open already it comes to the front and keeps what the user has typed. */
 void choices_show (const settings *s, int select);
 int choices_handle_menu (const int *selection);		/* a menu choice: 1 if it was the popup of this window (the application's menu handler asks first) */
+
+/* The program information window (title, icon, purpose, author, version): the first item of the icon bar menu opens it as its submenu. */
+window_handle info_window_create (void);
 
 #endif

@@ -11,6 +11,7 @@
 #include "DeskLib:Icon.h"
 #include "DeskLib:Menu.h"
 #include "DeskLib:Error.h"
+#include <openssl/opensslv.h>
 #include "choices.h"
 
 /* the icons: flags that are known to work (see the dialogue test of DeskLib64) */
@@ -306,4 +307,43 @@ void choices_show (const settings *s, int select)
     }
   Window_Show (win, open_CENTERED);
   Icon_SetCaret (win, i_nick);
+}
+
+/* ---- the program information window: the standard box that comes out of the first item of the icon bar menu ---- */
+
+window_handle info_window_create (void)
+{
+  static char title[] = "Program information";
+  static char t_name[] = "Natter", l_purpose[] = "Purpose", t_purpose[] = "An IRC client for RISC OS 64", l_author[] = "Author", t_author[] = "Rob Heaton";
+  static char l_version[] = "Version", t_version[] = "0.1 (" __DATE__ ")", t_ssl[] = "Uses OpenSSL " OPENSSL_VERSION_STR " (Apache Licence 2.0)", t_sprite[] = "natterbig";
+  window_block wb;
+  window_handle w = 0, keep = win;
+  icon_createblock ic;
+  const int width = 640, height = 300;
+  memset (&wb, 0, sizeof wb);
+  wb.screenrect.min.x = 300; wb.screenrect.min.y = 300; wb.screenrect.max.x = 300 + width; wb.screenrect.max.y = 300 + height;
+  wb.behind = -1;
+  wb.flags.value = 0x84000010u;						/* a title bar; the Wimp redraws it */
+  wb.colours.cols.titlefore = 7; wb.colours.cols.titleback = 2; wb.colours.cols.workfore = 7; wb.colours.cols.workback = 1;
+  wb.colours.cols.scrollouter = 3; wb.colours.cols.scrollinner = 1; wb.colours.cols.titlefocus = 12;
+  wb.workarearect.min.x = 0; wb.workarearect.max.x = width; wb.workarearect.max.y = 0; wb.workarearect.min.y = -height;
+  wb.titleflags.value = 0x119; wb.workflags.value = 0;
+  wb.title.indirecttext.buffer = DL_PTR (title); wb.title.indirecttext.validstring = (dl_ptr) -1; wb.title.indirecttext.bufflen = sizeof title;
+  wb.spritearea = 1;
+  wb.minsize.x = 100; wb.minsize.y = 100;
+  Wimp_CreateWindow (&wb, &w);
+  win = w;									/* mk () makes its icons in win */
+  memset (&ic, 0, sizeof ic);
+  ic.window = w;
+  ic.icondata.workarearect.min.x = 24; ic.icondata.workarearect.min.y = -170; ic.icondata.workarearect.max.x = 160; ic.icondata.workarearect.max.y = -34;
+  ic.icondata.flags.value = (7u << 24) | 0x2u | 0x8u | 0x10u | 0x100u;		/* a sprite, centred, indirected */
+  ic.icondata.data.indirectsprite.name = DL_PTR (t_sprite); ic.icondata.data.indirectsprite.spritearea = (dl_ptr) 1; ic.icondata.data.indirectsprite.nameisname = sizeof t_sprite;
+  { icon_handle h; Wimp_CreateIcon (&ic, &h); }
+  mk (190, -74, width - 20, -30, F_LABEL, t_name, sizeof t_name, NULL);
+  mk (190, -126, 300, -86, F_LABEL, l_purpose, sizeof l_purpose, NULL); mk (310, -126, width - 20, -86, F_LABEL, t_purpose, sizeof t_purpose, NULL);
+  mk (190, -172, 300, -132, F_LABEL, l_author, sizeof l_author, NULL); mk (310, -172, width - 20, -132, F_LABEL, t_author, sizeof t_author, NULL);
+  mk (190, -218, 300, -178, F_LABEL, l_version, sizeof l_version, NULL); mk (310, -218, width - 20, -178, F_LABEL, t_version, sizeof t_version, NULL);
+  mk (24, -276, width - 20, -236, F_LABEL, t_ssl, sizeof t_ssl, NULL);
+  win = keep;
+  return w;
 }

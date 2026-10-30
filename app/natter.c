@@ -1130,6 +1130,7 @@ static void put_in_input (const char *text)
 static void build_menus (void)
 {
   m_icon = Menu_New ("Natter", "Info,Networks,Choices...|Quit");
+  Menu_AddSubWindow (m_icon, 0, info_window_create ());						/* Info: the standard program information box */
   m_chan = Menu_New ("Conversation", "Join channel...,Part channel,Topic...|Log this conversation,Open log|Close conversation");
   m_nick = Menu_New ("Person", "Talk to,Who is|Give op,Take op,Give voice,Take voice|Kick,Ban|Insert in line");
 }
