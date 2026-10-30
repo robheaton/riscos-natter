@@ -124,6 +124,14 @@ static void dlog (const char *fmt, ...)
 }
 #define LOG dlog
 
+void natter_log (const char *fmt, ...)			/* for the other files of the application */
+{
+  va_list ap;
+  if (!logf) return;
+  va_start (ap, fmt); vfprintf (logf, fmt, ap); va_end (ap);
+  fputc ('\n', logf); fflush (logf);
+}
+
 /* the Pi holds back what is written to the NAS until the file is closed: close it and open it again, so that what has been logged so far can be read */
 static void log_sync (void)
 {

@@ -19,6 +19,8 @@
 /* An icon with indirected text in window w (buf has blen bytes; val is the validation string or NULL). */
 icon_handle dlg_icon (window_handle w, int x0, int y0, int x1, int y1, unsigned flags, char *buf, size_t blen, char *val);
 /* A dialogue window with a title bar, a close icon, and a work area of w x h units (not shown). */
-window_handle dlg_window (int x, int y, int w, int h, const char *title);
+window_handle dlg_window (int x, int y, int w, int h, const char *title, int own_redraw);
+/* own_redraw: the application redraws the window (it needs an event_REDRAW handler before the window is shown: it calls Wimp_RedrawWindow and Wimp_GetRectangle, and may draw after the icons);
+   otherwise the Wimp does it, which is right for a window with only icons. */
 
 #endif
