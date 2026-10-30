@@ -318,7 +318,7 @@ window_handle info_window_create (void)
   static const char *months[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
   window_block wb;
   window_handle w = 0, keep = win;
-  const int width = 520, height = 20 + 4 * 52 + 12;
+  const int width = 720, height = 20 + 4 * 52 + 12;
   const unsigned f_label = 0x07000311u;							/* text, vertically centred, right justified, indirected */
   const unsigned f_display = (7u << 24) | (2u << 28) | 0x1u | 0x4u | 0x8u | 0x10u | 0x20u | 0x100u;	/* text, border, centred, filled (grey), indirected: not writable */
   char mon[8] = "";
@@ -346,8 +346,8 @@ window_handle info_window_create (void)
       int top = -(20 + (int) r * 52);
       labels[0] = l_name; labels[1] = l_purpose; labels[2] = l_author; labels[3] = l_version;
       values[0] = t_name; values[1] = t_purpose; values[2] = t_author; values[3] = t_version;
-      mk (16, top - 44, 116, top, f_label, labels[r], strlen (labels[r]) + 1, NULL);
-      mk (128, top - 44, width - 16, top, f_display, values[r], r == 3 ? sizeof t_version : strlen (values[r]) + 1, v_field);
+      mk (16, top - 44, 176, top, f_label, labels[r], strlen (labels[r]) + 1, NULL);
+      mk (192, top - 44, width - 16, top, f_display, values[r], r == 3 ? sizeof t_version : strlen (values[r]) + 1, v_field);
     }
   win = keep;
   return w;
