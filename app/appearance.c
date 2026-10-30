@@ -81,6 +81,16 @@ static void copy (char *dst, size_t size, const char *src) { snprintf (dst, size
 
 /* ---- the colours of the swatches ---- */
 
+/* The swatch is painted by redraw_handler over its button: the Wimp has to ask for it (Wimp_ForceRedraw); redrawing the icon itself would plot the plain button over the colour. */
+static void redraw_swatch (int k)
+{
+  window_redrawblock rb;
+  rb.window = win;
+  rb.rect.min.x = FLD_X; rb.rect.max.x = FLD_X + SW_W;
+  rb.rect.min.y = rowtop (FIRST_COLOUR_ROW + k) - 44; rb.rect.max.y = rowtop (FIRST_COLOUR_ROW + k) - 4;
+  Wimp_ForceRedraw (&rb);
+}
+
 /* the colour of each slot as the window has it: the digits that are typed if they are a colour, otherwise what ed has */
 static void update_swatches (void)
 {
@@ -93,7 +103,7 @@ static void update_swatches (void)
     {
       unsigned rgb, was = swatch[i];
       swatch[i] = colour_parse (Icon_GetTextPtr (win, i_col[i]), &rgb) ? colour_bgr (rgb) : cols[i];
-      if (swatch[i] != was) Icon_ForceRedraw (win, i_sw[i]);
+      if (swatch[i] != was) redraw_swatch (i);
     }
 }
 
@@ -246,7 +256,7 @@ static BOOL click_handler (event_pollblock *event, void *reference)
   icon_handle i = event->data.mouse.icon;
   int k;
   (void) reference;
-  for (k = 0; k < NCOLOURS; k++) if (i == i_sw[k]) { open_picker (k); return TRUE; }
+  for (k = 0; k < NCOLOURS; k++) if (i == i_sw[k]) { open_picker (k); redraw_swatch (k); return TRUE; }
   if (i == i_light || i == i_dark)
     {
       int pt = atoi (Icon_GetTextPtr (win, i_size));
