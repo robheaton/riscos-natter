@@ -2,7 +2,7 @@
 
 An IRC client for RISC OS 64 (AArch64), with a native Wimp front end: one window with the scrollback in the middle and panes around it (buffer list, topic, nick list, input line), not a terminal.
 
-**Status: early, but it connects.** It has been run on a Raspberry Pi 5 with RISC OS 64: it connects to a public IRC network with TLS (the certificate and the server name are checked), logs in, joins channels, and shows the conversation with timestamps, coloured nicks, actions, highlights for mentions, unread badges, a nick list with prefixes, Tab completion of nicks and a history of what you typed.
+**Status: version 0.1, usable.** It has been run on a Raspberry Pi 5 with RISC OS 64. It connects to IRC networks with TLS (the certificate and the server name are checked), logs in with a password or SASL, joins channels and shows the conversation with timestamps, coloured nicks, IRC formatting (bold, italic, underline, colours), highlights for mentions with an optional beep, unread badges, a nick list with prefixes, clickable web addresses, selecting and copying text, Tab completion of nicks and a history of what you typed. Choices and Appearance (text size, light or dark theme, colours) are dialogue boxes; logs are plain text; the connection comes back by itself.
 
 ## What is where
 

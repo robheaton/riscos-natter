@@ -15,7 +15,7 @@ $CC -munixlib -O2 -fsigned-char -std=gnu99 -Wall -Wextra -Wno-unused-parameter -
   "$DL/lib/libDeskLib64.a" "$SSL/lib/libssl.a" "$SSL/lib/libcrypto.a" -o "$A/!RunImage,ff8"
 cp "$HERE/Resources/ca-bundle" "$A/Resources/ca-bundle"
 cp "$HERE/!Sprites,ff9" "$A/!Sprites,ff9"
-cp "$HERE/../LICENCE" "$A/Licence,fff"; cp "$HERE/../NOTICE.md" "$A/Notices,fff"					# the licence and the notices of what is inside the program travel with it
+cp "$HERE/../LICENCE" "$A/Licence,fff"; cp "$HERE/../NOTICE.md" "$A/Notices,fff"; cp "$HERE/../README.md" "$A/ReadMe,fff"					# the licence and the notices of what is inside the program travel with it
 printf '| Natter, an IRC client for RISC OS 64\nSet Natter$Dir <Obey$Dir>\nIconSprites <Obey$Dir>.!Sprites\nWimpSlot -min 16M -max 16M\nRun <Obey$Dir>.!RunImage\n' > "$A/!Run,feb"
 printf '| Natter\nIconSprites <Obey$Dir>.!Sprites\n' > "$A/!Boot,feb"
 echo "built $A"
