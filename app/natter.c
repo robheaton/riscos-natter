@@ -1663,10 +1663,13 @@ static BOOL null_handler (event_pollblock *event, void *reference)
       {
 	LOG ("main window is now %d x %d", w, h);
 	win_width = w; main_h = h;
-	layout_width = w - TEXT_X - RIGHT_EDGE - PAD;
-	if (layout_width < 100) layout_width = 100;
-	relayout_current ();
-	if (want_bottom) { want_bottom = 0; scroll_main_to_bottom (); }
+	{
+	  int follow = main_at_bottom ();					/* at the bottom before the lines wrap differently: stay there */
+	  layout_width = w - TEXT_X - RIGHT_EDGE - PAD;
+	  if (layout_width < 100) layout_width = 100;
+	  relayout_current ();
+	  if (follow || want_bottom) { want_bottom = 0; scroll_main_to_bottom (); }
+	}
 	nicks_dirty = 1;
 	refresh_lists ();							/* new extents for the lists ... */
 	Pane2_OpenWindow (win_main, NULL);					/* ... and the panes are opened again at their full height */
@@ -1752,7 +1755,7 @@ static void make_windows (void)
 {
   wimp_point off, size;
   icon_createblock ic;
-  win_main = make_window (80, 120, 1480, 860, 0xBF000002u, 255, 1400, 600, titlebuf, MIN_W, 400, 10);	/* vertical scroll bar, size box, title bar with indirected text; not redrawn by the Wimp */
+  win_main = make_window (80, 120, 80 + 1400 * font_pt / 11, 120 + 740 * font_pt / 11, 0xBF000002u, 255, 1400, 600, titlebuf, MIN_W, 400, 10);	/* the window opens bigger with bigger text */	/* vertical scroll bar, size box, title bar with indirected text; not redrawn by the Wimp */
   Pane2_AddMain (win_main);
   /* the panes: flags 0x90000000 is a window with a vertical scroll bar and nothing else, 0x80000000 one with nothing: neither can be moved */
   win_left = make_window (80, 120, 80 + LEFT_W, 700, 0x90000000u | 0x20u, 255, LEFT_W, 600, "", 20, 20, 3);
