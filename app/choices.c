@@ -313,7 +313,7 @@ void choices_show (const settings *s, int select)
 window_handle info_window_create (void)
 {
   static char title[] = "About this program";
-  static char l_name[] = "Name", t_name[] = "Natter", l_purpose[] = "Purpose", t_purpose[] = "An IRC client for RISC OS 64", l_author[] = "Author", t_author[] = "\xA9 Rob Heaton 2026";
+  static char l_name[] = "Name", t_name[] = "Natter", l_purpose[] = "Purpose", t_purpose[] = "IRC Client", l_author[] = "Author", t_author[] = "\xA9 Rob Heaton 2026";
   static char l_version[] = "Version", t_version[48], v_field[] = "R2";
   static const char *months[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
   window_block wb;
