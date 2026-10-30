@@ -13,6 +13,7 @@
 #include "DeskLib:Error.h"
 #include "choices.h"
 #include "dialog.h"
+#include "version.h"
 
 #define W 940
 #define ROW 56
@@ -311,8 +312,8 @@ window_handle info_window_create (void)
   int day = 0, year = 0, k;
   size_t r;
   if (sscanf (__DATE__, "%7s %d %d", mon, &day, &year) == 3)				/* "Oct 30 2026" -> "30 Oct 2026" */
-    { for (k = 0; k < 12; k++) if (!strncmp (mon, months[k], 3)) break; snprintf (t_version, sizeof t_version, "0.1 (%d %s %d)", day, k < 12 ? months[k] : mon, year); }
-  else snprintf (t_version, sizeof t_version, "0.1");
+    { for (k = 0; k < 12; k++) if (!strncmp (mon, months[k], 3)) break; snprintf (t_version, sizeof t_version, NATTER_VERSION " (%d %s %d)", day, k < 12 ? months[k] : mon, year); }
+  else snprintf (t_version, sizeof t_version, NATTER_VERSION);
   memset (&wb, 0, sizeof wb);
   wb.screenrect.min.x = 300; wb.screenrect.min.y = 300; wb.screenrect.max.x = 300 + width; wb.screenrect.max.y = 300 + height;
   wb.behind = -1;

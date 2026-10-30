@@ -3,6 +3,7 @@
      # a comment
      nick = alice
      log = on
+     debug_log = RAM::RamDisc0.$.NatterDebug
      beep = yes
      font_size = 11
      theme = dark
@@ -48,6 +49,7 @@ typedef struct
   int log;				/* keep logs of the conversations (default yes) */
   int beep;				/* a beep when the nick is mentioned or a private message comes (default yes) */
   char logdir[200];			/* where the logs go; empty: the default */
+  char debuglog[200];			/* a folder for the debug log of the program itself (a file for each run); empty: no debug log, which is what everybody wants.  Not in the Choices window. */
   int font_size;			/* points, FONT_MIN to FONT_MAX */
   int theme;				/* THEME_LIGHT or THEME_DARK: the colours that are not set below */
   char colours[NCOLOURS][8];		/* "RRGGBB" for the background, the text, the faded text (times, joins), the lines that mention the nick and the lists; empty: the theme's */

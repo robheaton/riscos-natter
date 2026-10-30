@@ -2,7 +2,7 @@
 
 An IRC client for RISC OS 64 (AArch64), with a native Wimp front end: one window with the scrollback in the middle and panes around it (buffer list, topic, nick list, input line), not a terminal.
 
-**Status: version 0.1, usable.** It has been run on a Raspberry Pi 5 with RISC OS 64. It connects to IRC networks with TLS (the certificate and the server name are checked), logs in with a password or SASL, joins channels and shows the conversation with timestamps, coloured nicks, IRC formatting (bold, italic, underline, colours), highlights for mentions with an optional beep, unread badges, a nick list with prefixes, clickable web addresses, selecting and copying text, Tab completion of nicks and a history of what you typed. Choices and Appearance (text size, light or dark theme, colours) are dialogue boxes; logs are plain text; the connection comes back by itself.
+**Status: version 0.1.1, usable.** It has been run on a Raspberry Pi 5 with RISC OS 64. It connects to IRC networks with TLS (the certificate and the server name are checked), logs in with a password or SASL, joins channels and shows the conversation with timestamps, coloured nicks, IRC formatting (bold, italic, underline, colours), highlights for mentions with an optional beep, unread badges, a nick list with prefixes, clickable web addresses, selecting and copying text, Tab completion of nicks and a history of what you typed. Choices and Appearance (text size, light or dark theme, colours) are dialogue boxes; logs are plain text; the connection comes back by itself.
 
 ## What is where
 
@@ -28,8 +28,16 @@ Start `!Natter`: it puts an icon on the icon bar (Menu: Info, Networks, Choices.
 
 several networks at once.
 
+## Debug log
+
+Natter writes no debug log unless you ask for one. To get one (for a bug report), add a line to the choices file (`<Choices$Write>.Natter.Choices`) giving a folder that exists:
+
+    debug_log = RAM::RamDisc0.$.NatterDebug
+
+Each run then writes a file `nl<time>` in that folder with what the program did (every window redraw and event), so it grows fast: only use it when you are looking for a fault. The Choices window keeps the line when it saves.
+
 ## Licence
 
 Natter is under the **Zero-Clause BSD** licence (`LICENCE`): use it, copy it, change it and share it for any purpose, with no conditions. The compiled program also contains DeskLib, OpenSSL, a list of root certificates and the C library of the tool chain, which keep their own licences: `NOTICE.md` says which, and what a copy of the program has to say about them.
 
-64-bit only. Built with the [riscos-gcc16](https://github.com/robheaton/riscos-gcc16) RISC OS 64 tool chain, DeskLib64 and OpenSSL.
+64-bit only. Built with the [riscos-gcc16](https://github.com/robheaton/riscos-gcc16) RISC OS 64 tool chain, DeskLib64 and OpenSSL 4.0.3 (`build.sh` needs `SSL=` a folder with the AArch64 OpenSSL headers and libraries).

@@ -37,6 +37,7 @@
 #include "theme.h"
 #include "select.h"
 #include "links.h"
+#include "version.h"
 #include "format.h"
 #include "clip.h"
 
@@ -743,7 +744,7 @@ static irc_config make_config (void)
   cfg.nick = current_nick ();
   cfg.user = cur_net.user[0] ? cur_net.user : cfg_set.user;
   cfg.realname = cur_net.realname[0] ? cur_net.realname : cfg_set.realname;
-  cfg.ctcp_version = "Natter 0.1 (RISC OS 64)";
+  cfg.ctcp_version = "Natter " NATTER_VERSION " (RISC OS 64)";
   if (cur_net.sasl_user[0] && cur_net.sasl_pass[0]) { cfg.sasl_user = cur_net.sasl_user; cfg.sasl_pass = cur_net.sasl_pass; }
   if (cur_net.password[0]) cfg.pass = cur_net.password;
   return cfg;
@@ -1427,7 +1428,7 @@ static BOOL menu_handler (event_pollblock *event, void *reference)
     {
       switch (sel[0])
 	{
-	case 0: status_line (LK_INFO, "Natter 0.1 for RISC OS 64: an IRC client. Logs: %s", logdir); break;
+	case 0: status_line (LK_INFO, "Natter " NATTER_VERSION " for RISC OS 64: an IRC client. Logs: %s", logdir); break;
 	case 1: if (sel[1] >= 0 && sel[1] < cfg_set.nnets) connect_network (&cfg_set.nets[sel[1]]); break;
 	case 2: choices_show (&cfg_set, settings_find (&cfg_set, cur_net.name)); break;
 	case 3: appearance_show (&cfg_set); break;
@@ -1941,17 +1942,18 @@ static void log_geometry (const char *when)
 int main (void)
 {
   irc_config cfg;
-  {									/* the log goes to the NAS in a new file for each run: it can be read from there even if the machine freezes */
-    snprintf (logpath, sizeof logpath, "LanMan98::RISCOS.$.Development.GCC.riscos64.irc64.log.nl%ld", (long) time (NULL));
-    logf = fopen (logpath, "w");
-    if (!logf) { logpath[0] = 0; logf = fopen ("NVMe::NVMe.$.natterlog", "w"); }
-  }
-  LOG ("Natter starting");
   Event_Initialise ("Natter");
   EventMsg_Initialise ();
   event_mask.data.null = 0;
   read_timezone ();
   settings_load (&cfg_set, CHOICES_READ);
+  if (cfg_set.debuglog[0])							/* a debug log only when the choices have a debug_log folder: a new file for each run (on a NAS it can be read even if the machine freezes) */
+    {
+      snprintf (logpath, sizeof logpath, "%s.nl%ld", cfg_set.debuglog, (long) time (NULL));
+      logf = fopen (logpath, "w");
+      if (!logf) logpath[0] = 0;
+    }
+  LOG ("Natter %s starting", NATTER_VERSION);
   apply_appearance (&cfg_set);							/* the colours, the fonts and the sizes that come from the size of the text */
   if (!fnorm_w) Error_ReportFatal (0, "Natter needs the font Homerton.Medium");
   LOG ("fonts open: %d %d %d", (int) fnorm, (int) fbold, (int) fital);
@@ -1999,7 +2001,7 @@ int main (void)
   log_geometry ("opened");
   set_title ();
   demo_active = 0;
-  status_line (LK_INFO, "Natter 0.1 for RISC OS 64. /help lists the commands; /networks the networks of your choices; /connect NAME connects; /demo shows a made-up conversation.");
+  status_line (LK_INFO, "Natter " NATTER_VERSION " for RISC OS 64. /help lists the commands; /networks the networks of your choices; /connect NAME connects; /demo shows a made-up conversation.");
   status_line (LK_INFO, cfg_set.log ? "Conversations are logged in %s (/log off stops it for one, /log all off for all)" : "Logging is off (/log on turns it on for one conversation, /log all on for all)", logdir);
   {
     int k, started = 0;

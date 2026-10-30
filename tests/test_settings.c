@@ -51,6 +51,9 @@ int main (void)
     write_file (tmp ("beepfile"), "beep = no\n"); settings_load (&u, tmp ("beepfile")); CHECK_INT (u.beep, 0);
     CHECK_INT (settings_save (&u, tmp ("beep")), 0); settings_load (&v, tmp ("beep")); CHECK_INT (v.beep, 0);
     write_file (tmp ("beepfile"), "nick = x\n"); settings_load (&u, tmp ("beepfile")); CHECK_INT (u.beep, 1);			/* an old file: on */
+    CHECK_STR (u.debuglog, "");											/* no debug log unless it is asked for */
+    write_file (tmp ("beepfile"), "debug_log = NAS::Logs\n"); settings_load (&u, tmp ("beepfile")); CHECK_STR (u.debuglog, "NAS::Logs");
+    CHECK_INT (settings_save (&u, tmp ("beep")), 0); settings_load (&v, tmp ("beep")); CHECK_STR (v.debuglog, "NAS::Logs");	/* it is kept when the choices are saved */
   }
   CHECK_INT (settings_save (&s, "/nonexistent/folder/file"), -1);
 

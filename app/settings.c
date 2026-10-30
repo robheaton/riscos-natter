@@ -141,6 +141,7 @@ int settings_load (settings *s, const char *path)
 	else if (!strcasecmp (k, "log")) s->log = yes (v);
 	else if (!strcasecmp (k, "beep")) s->beep = yes (v);
 	else if (!strcasecmp (k, "logdir")) copy (s->logdir, sizeof s->logdir, v);
+	else if (!strcasecmp (k, "debug_log")) copy (s->debuglog, sizeof s->debuglog, v);
 	else if (!strcasecmp (k, "font_size")) s->font_size = atoi (v) > 0 ? font_size_clamp (atoi (v)) : FONT_DEFAULT;
 	else if (!strcasecmp (k, "theme")) s->theme = !strcasecmp (v, "dark") ? THEME_DARK : THEME_LIGHT;
 	else
@@ -173,6 +174,7 @@ int settings_save (const settings *s, const char *path)
   fprintf (f, "log = %s\n", s->log ? "yes" : "no");
   fprintf (f, "beep = %s\n", s->beep ? "yes" : "no");
   if (s->logdir[0]) put (f, "logdir", s->logdir);
+  if (s->debuglog[0]) put (f, "debug_log", s->debuglog);
   fprintf (f, "font_size = %d\ntheme = %s\n", font_size_clamp (s->font_size), s->theme == THEME_DARK ? "dark" : "light");
   for (i = 0; i < NCOLOURS; i++) if (colour_parse (s->colours[i], NULL)) put (f, colour_keys[i], s->colours[i]);
   for (i = 0; i < s->nnets; i++)

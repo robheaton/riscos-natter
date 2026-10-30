@@ -1,12 +1,14 @@
 #!/bin/bash
 # app/build.sh [TC]: builds Natter for RISC OS 64 into out/!Natter (copy the folder to the machine and double-click it).
 # TC = a RISC OS 64 tool chain folder (default: the development one); DL = the built DeskLib64 (default ~/Development/desklib64/dist);
-# SSL = a prefix with the AArch64 OpenSSL (include/ and lib/libssl.a, libcrypto.a; default: ~/Development/openssl-aarch64).
+# SSL = a prefix with the AArch64 OpenSSL (include/ and lib/libssl.a, libcrypto.a): required.
+# Your own settings of TC, DL and SSL can go into build.local next to this script (it is not in the repository).
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
+[ -f "$HERE/build.local" ] && . "$HERE/build.local"
 TC=${1:-${TC:-/var/tmp/a64/target7-inst}}
 DL=${DL:-/home/robh/Development/desklib64/dist}
-SSL=${SSL:-/home/robh/Development/openssl-aarch64}
+SSL=${SSL:?set SSL to a prefix with the AArch64 OpenSSL: include/, lib/libssl.a and lib/libcrypto.a}
 CC=$TC/bin/aarch64-riscos-gcc
 A=$HERE/out/'!Natter'
 mkdir -p "$A/Resources"

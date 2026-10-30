@@ -13,3 +13,4 @@ app/test_select
 app/test_format
 app/test_links
 spike/dns/dnsprobe,ff8
+app/build.local
