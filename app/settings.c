@@ -20,6 +20,7 @@ void settings_defaults (settings *s)
   copy (s->user, sizeof s->user, "natter");
   copy (s->realname, sizeof s->realname, "Natter on RISC OS 64");
   s->log = 1;
+  s->font_size = FONT_DEFAULT;
 }
 
 static void net_defaults (netsettings *n, const char *name)
@@ -59,6 +60,27 @@ void settings_remove (settings *s, int index)
   memmove (&s->nets[index], &s->nets[index + 1], (size_t) (s->nnets - index - 1) * sizeof s->nets[0]);
   s->nnets--;
 }
+
+static const char *const colour_keys[NCOLOURS] = { "colour_background", "colour_text", "colour_faded", "colour_mention", "colour_lists" };
+
+int colour_parse (const char *hex, unsigned *rgb)
+{
+  unsigned v = 0;
+  int i;
+  if (!hex || strlen (hex) != 6) return 0;
+  for (i = 0; i < 6; i++)
+    {
+      int c = (unsigned char) hex[i];
+      if (c >= '0' && c <= '9') v = v * 16 + (unsigned) (c - '0');
+      else if (c >= 'a' && c <= 'f') v = v * 16 + (unsigned) (c - 'a' + 10);
+      else if (c >= 'A' && c <= 'F') v = v * 16 + (unsigned) (c - 'A' + 10);
+      else return 0;
+    }
+  if (rgb) *rgb = v;
+  return 1;
+}
+
+int font_size_clamp (int pt) { return pt < FONT_MIN ? FONT_MIN : pt > FONT_MAX ? FONT_MAX : pt; }
 
 static int yes (const char *v) { return !strcasecmp (v, "yes") || !strcasecmp (v, "on") || !strcasecmp (v, "true") || !strcmp (v, "1"); }
 
@@ -117,6 +139,14 @@ int settings_load (settings *s, const char *path)
 	else if (!strcasecmp (k, "realname")) copy (s->realname, sizeof s->realname, v);
 	else if (!strcasecmp (k, "log")) s->log = yes (v);
 	else if (!strcasecmp (k, "logdir")) copy (s->logdir, sizeof s->logdir, v);
+	else if (!strcasecmp (k, "font_size")) s->font_size = atoi (v) > 0 ? font_size_clamp (atoi (v)) : FONT_DEFAULT;
+	else if (!strcasecmp (k, "theme")) s->theme = !strcasecmp (v, "dark") ? THEME_DARK : THEME_LIGHT;
+	else
+	  {
+	    int c;
+	    for (c = 0; c < NCOLOURS; c++)
+	      if (!strcasecmp (k, colour_keys[c])) { if (colour_parse (v, NULL)) copy (s->colours[c], sizeof s->colours[c], v); else s->colours[c][0] = 0; }
+	  }
       }
     }
   fclose (f);
@@ -140,6 +170,8 @@ int settings_save (const settings *s, const char *path)
   put (f, "nick", s->nick); put (f, "user", s->user); put (f, "realname", s->realname);
   fprintf (f, "log = %s\n", s->log ? "yes" : "no");
   if (s->logdir[0]) put (f, "logdir", s->logdir);
+  fprintf (f, "font_size = %d\ntheme = %s\n", font_size_clamp (s->font_size), s->theme == THEME_DARK ? "dark" : "light");
+  for (i = 0; i < NCOLOURS; i++) if (colour_parse (s->colours[i], NULL)) put (f, colour_keys[i], s->colours[i]);
   for (i = 0; i < s->nnets; i++)
     {
       const netsettings *n = &s->nets[i];

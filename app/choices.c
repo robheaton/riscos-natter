@@ -12,13 +12,7 @@
 #include "DeskLib:Menu.h"
 #include "DeskLib:Error.h"
 #include "choices.h"
-
-/* the icons: flags that are known to work (see the dialogue test of DeskLib64) */
-#define F_LABEL (0x07000111u)					/* text, vertically centred, indirected */
-#define F_FIELD (0x0700F135u)					/* a writable field: text, border, filled, vcentre, indirected, button type 15 */
-#define F_OPTION (0x0700B113u)					/* an option button: type 11, with the sprites of the validation string */
-#define F_BUTTON (0x07000119u | (1u << 2) | (1u << 5) | (3u << 12))	/* text, centred, indirected, border, filled, click */
-#define F_POPUP (0x07000115u | (1u << 5) | (3u << 12))		/* the same, text on the left: it shows the network that is picked */
+#include "dialog.h"
 
 #define W 940
 #define ROW 56
@@ -46,20 +40,7 @@ static icon_handle i_nick, i_user, i_real, i_log, i_logdir, i_open, i_pick, i_ne
 static icon_handle order[12];					/* the writable fields in the order of the Tab key */
 static int norder;
 
-static icon_handle mk (int x0, int y0, int x1, int y1, unsigned flags, char *buf, size_t blen, char *val)
-{
-  icon_createblock ic;
-  icon_handle h = -1;
-  memset (&ic, 0, sizeof ic);
-  ic.window = win;
-  ic.icondata.workarearect.min.x = x0; ic.icondata.workarearect.min.y = y0; ic.icondata.workarearect.max.x = x1; ic.icondata.workarearect.max.y = y1;
-  ic.icondata.flags.value = flags;
-  ic.icondata.data.indirecttext.buffer = DL_PTR (buf);
-  ic.icondata.data.indirecttext.validstring = val ? DL_PTR (val) : (dl_ptr) -1;
-  ic.icondata.data.indirecttext.bufflen = (int) blen;
-  Wimp_CreateIcon (&ic, &h);
-  return h;
-}
+static icon_handle mk (int x0, int y0, int x1, int y1, unsigned flags, char *buf, size_t blen, char *val) { return dlg_icon (win, x0, y0, x1, y1, flags, buf, blen, val); }
 
 static int rowtop (int r) { return -(24 + r * ROW); }
 static void label (int r, char *text) { mk (LBL_X, rowtop (r) - 44, LBL_X + LBL_W, rowtop (r) - 4, F_LABEL, text, strlen (text) + 1, NULL); }

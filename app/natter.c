@@ -32,17 +32,21 @@
 #include "settings.h"
 #include "logfile.h"
 #include "choices.h"
+#include "appearance.h"
+#include "theme.h"
 
 /* ---- the geometry, in OS units ---- */
-#define LH 36				/* a row of the scrollback */
-#define LISTLH 36			/* a row of the buffer list and the nick list */
+static int font_pt = FONT_DEFAULT;	/* the size of the text, in points: the rows and the columns of the conversation grow with it (set_metrics) */
+static int m_lh = 36, m_ts = 80, m_nickw = 210;
+#define LH m_lh				/* a row of the scrollback */
+#define LISTLH m_lh			/* a row of the buffer list and the nick list */
 #define LEFT_W 300
 #define RIGHT_W 250
 #define TOP_H 44
 #define BOT_H 52
 #define PAD 12
-#define TS_W 80				/* the time column */
-#define NICK_W 210			/* the nick column, right aligned */
+#define TS_W m_ts			/* the time column */
+#define NICK_W m_nickw			/* the nick column, right aligned */
 #define GAP 14
 #define SB 44				/* the width of a scroll bar: the panes have one beside their work area, and it covers the window behind */
 #define LEFT_EDGE (LEFT_W + SB)		/* the left pane and its scroll bar */
@@ -50,18 +54,22 @@
 #define TEXT_X (LEFT_EDGE + PAD + TS_W + NICK_W + GAP)	/* where the text starts, from the left edge of the window */
 #define MIN_W (TEXT_X + RIGHT_EDGE + 340)		/* the narrowest window: the text column keeps room for about 40 characters */
 
-/* ---- colours: 0xBBGGRR00 ---- */
-#define COL_TEXT 0x00000000
-#define COL_MUTED 0x80808000
-#define COL_WHITE 0xFFFFFF00
-#define COL_BAND 0xC0FFFF00
-#define COL_SEL 0xFFE8D000
-#define COL_RED 0x0000C800
-#define COL_MARK 0x2020D000
-#define COL_LISTBG 0xF0F0F000
-static const unsigned nickcol[NICK_COLOURS] = { 0xC0600000, 0x50A03000, 0x2020D000, 0x00A0D000, 0xA0306000, 0x80808000, 0xA0A00000, 0x20208000 };
+/* ---- colours: 0xBBGGRR00, from the theme and the choices of the user (theme.h) ---- */
+static palette pal;
+#define COL_TEXT (pal.text)
+#define COL_MUTED (pal.faded)
+#define COL_WHITE (pal.back)		/* the background of the conversation (white in the light theme) */
+#define COL_BAND (pal.mention)
+#define COL_SEL (pal.selected)
+#define COL_RED (pal.error)
+#define COL_MARK (pal.marker)
+#define COL_LISTBG (pal.lists)
+#define nickcol (pal.nick)
 
 #define MAXBUF 64
+static int windows_made;			/* the windows exist: a change of appearance has something to redraw */
+static int want_bottom;				/* after the next layout, scroll to the newest line */
+static void apply_appearance (const settings *s);
 #define MAXHIST 64
 
 static window_handle win_main, win_topic, win_left, win_right, win_input;
@@ -261,10 +269,17 @@ static int main_at_bottom (void)
   return -st.openblock.scroll.y + vis >= total_height (bufs[cur]) - 2 * LH;
 }
 
+/* the name of the network as the user called it in the Choices; failing that the name that the server gives itself */
+static const char *net_label (void)
+{
+  if (cur_net.name[0]) return cur_net.name;
+  return irc_conn_network (conn) ? irc_conn_network (conn) : "Natter";
+}
+
 static void set_title (void)
 {
   buffer *b = bufs[cur];
-  const char *net = irc_conn_network (conn) ? irc_conn_network (conn) : "Natter";
+  const char *net = net_label ();
   char t[96];
   if (b->kind == BK_STATUS) snprintf (t, sizeof t, "%s", net);
   else snprintf (t, sizeof t, "%s: %s", net, b->name);
@@ -967,6 +982,7 @@ static void draw_scrollback (window_redrawblock *rb)
   int right = rb->rect.max.x - RIGHT_EDGE;
   int first = (oy - TOP_H - rb->cliprect.max.y) / LH, last = (oy - TOP_H - rb->cliprect.min.y) / LH, row;
   size_t line = 0; int rowin = 0;
+  fill (rb->cliprect.min.x, rb->cliprect.min.y, rb->cliprect.max.x - rb->cliprect.min.x, rb->cliprect.max.y - rb->cliprect.min.y, COL_WHITE);	/* the work area has no colour of its own */
   if (first < 0) first = 0;
   if (last >= (int) buffer_total_rows (b)) last = (int) buffer_total_rows (b) - 1;
   if (last > first + 400) last = first + 400;					/* a window is never taller than that in rows */
@@ -981,7 +997,7 @@ static void draw_scrollback (window_redrawblock *rb)
       if (row == first) { if (!buffer_find_row (b, (size_t) row, &line, &rowin)) break; }
       else if (++rowin >= b->lines[line].nrows) { line++; rowin = 0; }
       l = &b->lines[line];
-      top = oy - TOP_H - row * LH; y0 = top - LH; base = y0 + 11;
+      top = oy - TOP_H - row * LH; y0 = top - LH; base = y0 + font_pt;
       bg = l->highlight ? COL_BAND : COL_WHITE;
       if (l->highlight) fill (rb->rect.min.x + LEFT_EDGE, y0, right - rb->rect.min.x - LEFT_EDGE, LH, COL_BAND);
       if (rowin == 0 && b->new_marker > 0 && (size_t) b->new_marker == line && (size_t) b->new_marker < b->n)	/* the mark of the new messages, above the first of them */
@@ -1033,24 +1049,25 @@ static BOOL left_redraw (event_pollblock *event, void *reference)
   while (more)
     {
       int oy = rb.rect.max.y - rb.scroll.y, ox = rb.rect.min.x - rb.scroll.x, i;
+      fill (rb.cliprect.min.x, rb.cliprect.min.y, rb.cliprect.max.x - rb.cliprect.min.x, rb.cliprect.max.y - rb.cliprect.min.y, COL_LISTBG);
       for (i = 0; i < nbufs; i++)
 	{
 	  buffer *b = bufs[i];
-	  int top = oy - 4 - i * LISTLH, y0 = top - LISTLH, base = y0 + 11;
+	  int top = oy - 4 - i * LISTLH, y0 = top - LISTLH, base = y0 + font_pt;
 	  char name[96], badge[16];
 	  unsigned fg = COL_TEXT;
 	  if (top < rb.cliprect.min.y || y0 > rb.cliprect.max.y) continue;
 	  if (i == cur) fill (rb.rect.min.x, y0, LEFT_W, LISTLH, COL_SEL);
-	  if (b->kind == BK_STATUS) snprintf (name, sizeof name, "%s", irc_conn_network (conn) ? irc_conn_network (conn) : "Status"); else snprintf (name, sizeof name, "%s", b->name);
-	  if (b->kind == BK_QUERY) fg = 0x40802000;
+	  if (b->kind == BK_STATUS) snprintf (name, sizeof name, "%s", cur_net.name[0] || irc_conn_network (conn) ? net_label () : "Status"); else snprintf (name, sizeof name, "%s", b->name);
+	  if (b->kind == BK_QUERY) fg = pal.query;
 	  paint (b->unread && i != cur ? fbold : fnorm, fg, i == cur ? COL_SEL : COL_LISTBG, ox + (b->kind == BK_STATUS ? 12 : 30), base, name, strlen (name));
 	  if (b->unread && i != cur)
 	    {
 	      int w;
 	      snprintf (badge, sizeof badge, "%d", b->highlights ? b->highlights : b->unread);
 	      w = bold_width (badge) + 16;
-	      fill (ox + LEFT_W - w - 14, y0 + 6, w, LISTLH - 12, b->highlights ? COL_RED : 0xD0D0D000);
-	      paint (fbold, b->highlights ? COL_WHITE : COL_TEXT, b->highlights ? COL_RED : 0xD0D0D000, ox + LEFT_W - w - 6, base, badge, strlen (badge));
+	      fill (ox + LEFT_W - w - 14, y0 + 6, w, LISTLH - 12, b->highlights ? COL_RED : pal.badge);
+	      paint (fbold, b->highlights ? COL_WHITE : COL_TEXT, b->highlights ? COL_RED : pal.badge, ox + LEFT_W - w - 6, base, badge, strlen (badge));
 	    }
 	}
       Wimp_GetRectangle (&rb, &more);
@@ -1072,11 +1089,12 @@ static BOOL right_redraw (event_pollblock *event, void *reference)
       int oy = rb.rect.max.y - rb.scroll.y, ox = rb.rect.min.x - rb.scroll.x;
       size_t i;
       char head[32];
+      fill (rb.cliprect.min.x, rb.cliprect.min.y, rb.cliprect.max.x - rb.cliprect.min.x, rb.cliprect.max.y - rb.cliprect.min.y, COL_LISTBG);
       snprintf (head, sizeof head, "%lu users", (unsigned long) nnicks);
-      if (bufs[cur]->kind == BK_CHANNEL) paint (fnorm, COL_MUTED, COL_LISTBG, ox + 12, oy - LISTLH + 8, head, strlen (head));
+      if (bufs[cur]->kind == BK_CHANNEL) paint (fnorm, COL_MUTED, COL_LISTBG, ox + 12, oy - LISTLH + font_pt * 8 / 11, head, strlen (head));
       for (i = 0; i < nnicks; i++)
 	{
-	  int top = oy - 4 - (int) (i + 1) * LISTLH, y0 = top - LISTLH, base = y0 + 11;
+	  int top = oy - 4 - (int) (i + 1) * LISTLH, y0 = top - LISTLH, base = y0 + font_pt;
 	  const irc_user *u = nicks[i].user;
 	  irc_member m;
 	  char sym[2] = { 0, 0 };
@@ -1107,8 +1125,9 @@ static BOOL topic_redraw (event_pollblock *event, void *reference)
   while (more)
     {
       int ox = rb.rect.min.x - rb.scroll.x, oy = rb.rect.max.y - rb.scroll.y;
-      fill (rb.rect.min.x, oy - TOP_H, rb.rect.max.x - rb.rect.min.x, 2, 0x80808000);
-      paint (fnorm, COL_TEXT, COL_WHITE, ox + 16, oy - 29, tmp, strlen (tmp));
+      fill (rb.cliprect.min.x, rb.cliprect.min.y, rb.cliprect.max.x - rb.cliprect.min.x, rb.cliprect.max.y - rb.cliprect.min.y, COL_WHITE);
+      fill (rb.rect.min.x, oy - TOP_H, rb.rect.max.x - rb.rect.min.x, 2, COL_MUTED);
+      paint (fnorm, COL_TEXT, COL_WHITE, ox + 16, oy - (8 + font_pt * 7 / 4), tmp, strlen (tmp));
       Wimp_GetRectangle (&rb, &more);
     }
   return TRUE;
@@ -1121,11 +1140,27 @@ static void ch_saved (const settings *s)
   const char *old = logdir;
   char before[sizeof logdir];
   snprintf (before, sizeof before, "%s", old);
-  cfg_set = *s;
+  {									/* the Choices window knows nothing about the appearance: what the Appearance window saved since it was opened stays */
+    int pt = cfg_set.font_size, theme = cfg_set.theme;
+    char colours[NCOLOURS][8];
+    memcpy (colours, cfg_set.colours, sizeof colours);
+    cfg_set = *s;
+    cfg_set.font_size = pt; cfg_set.theme = theme; memcpy (cfg_set.colours, colours, sizeof colours);
+  }
   snprintf (logdir, sizeof logdir, "%s", cfg_set.logdir[0] ? cfg_set.logdir : "<Choices$Write>.Natter.Logs");
   if (strcmp (before, logdir)) { logger_free (lg); lg = logger_new (logdir, "."); }
   save_settings ();
 }
+
+static void ap_saved (const settings *s)
+{
+  cfg_set.font_size = s->font_size; cfg_set.theme = s->theme;
+  memcpy (cfg_set.colours, s->colours, sizeof cfg_set.colours);
+  save_settings ();
+  apply_appearance (&cfg_set);
+}
+
+static const appearance_callbacks ap_callbacks = { apply_appearance, ap_saved };
 
 static void ch_connect (int index) { if (index >= 0 && index < cfg_set.nnets) connect_network (&cfg_set.nets[index]); }
 
@@ -1204,7 +1239,7 @@ static void put_in_input (const char *text)
 
 static void build_menus (void)
 {
-  m_icon = Menu_New ("Natter", "Info,Networks,Choices...|Quit");
+  m_icon = Menu_New ("Natter", "Info,Networks,Choices...,Appearance...|Quit");
   Menu_AddSubWindow (m_icon, 0, info_window_create ());						/* Info: the standard program information box */
   m_chan = Menu_New ("Conversation", "Join channel...,Part channel,Topic...|Log this conversation,Open log|Close conversation");
   m_nick = Menu_New ("Person", "Talk to,Who is|Give op,Take op,Give voice,Take voice|Kick,Ban|Insert in line");
@@ -1272,7 +1307,8 @@ static BOOL menu_handler (event_pollblock *event, void *reference)
 	case 0: status_line (LK_INFO, "Natter 0.1 for RISC OS 64: an IRC client. Logs: %s", logdir); break;
 	case 1: if (sel[1] >= 0 && sel[1] < cfg_set.nnets) connect_network (&cfg_set.nets[sel[1]]); break;
 	case 2: choices_show (&cfg_set, settings_find (&cfg_set, cur_net.name)); break;
-	case 3: quit_app (); break;
+	case 3: appearance_show (&cfg_set); break;
+	case 4: quit_app (); break;
 	}
     }
   else if (shown == m_chan && menu_buf >= 0 && menu_buf < nbufs)
@@ -1427,6 +1463,7 @@ static BOOL null_handler (event_pollblock *event, void *reference)
 	layout_width = w - TEXT_X - RIGHT_EDGE - PAD;
 	if (layout_width < 100) layout_width = 100;
 	relayout_current ();
+	if (want_bottom) { want_bottom = 0; scroll_main_to_bottom (); }
 	nicks_dirty = 1;
 	refresh_lists ();							/* new extents for the lists ... */
 	Pane2_OpenWindow (win_main, NULL);					/* ... and the panes are opened again at their full height */
@@ -1436,6 +1473,48 @@ static BOOL null_handler (event_pollblock *event, void *reference)
   if (nicks_dirty && bufs[cur]->kind == BK_CHANNEL) { rebuild_nicks (); refresh_lists (); }
   else if (nicks_dirty) { rebuild_nicks (); }
   return TRUE;
+}
+
+/* ---- appearance: the size of the text and the colours ---- */
+
+static int fbold_own, fital_own;		/* the handles that were found (the bold and italic fall back to the normal font, which is then not released twice) */
+
+static void set_metrics (int pt)
+{
+  font_pt = pt;
+  m_lh = (36 * pt + 5) / 11; m_ts = (80 * pt + 5) / 11; m_nickw = (210 * pt + 5) / 11;
+}
+
+/* the fonts at a size; 0, or -1 if the normal one is not there (what was open stays) */
+static int open_fonts (int pt)
+{
+  unsigned n = 0, b = 0, i = 0;
+  int size = pt * 16, bo = 0, io = 0;
+  if (Font_FindFont ((font_handle *) &n, "Homerton.Medium\\EUTF8", size, size, 0, 0) && Font_FindFont ((font_handle *) &n, "Homerton.Medium", size, size, 0, 0)) return -1;
+  if (Font_FindFont ((font_handle *) &b, "Homerton.Bold\\EUTF8", size, size, 0, 0)) b = n; else bo = 1;
+  if (Font_FindFont ((font_handle *) &i, "Homerton.Medium.Oblique\\EUTF8", size, size, 0, 0)) i = n; else io = 1;
+  if (fnorm_w) { Font_LoseFont (fnorm); if (fbold_own) Font_LoseFont (fbold); if (fital_own) Font_LoseFont (fital); }
+  fnorm_w = n; fbold_w = b; fital_w = i; fbold_own = bo; fital_own = io;
+  return 0;
+}
+
+/* The colours and the size of the text of these choices.  Before the windows are made it only sets them up; after that it lays the conversations out again and redraws everything. */
+static void apply_appearance (const settings *s)
+{
+  int pt = font_size_clamp (s->font_size), i, changed = 0;
+  palette_make (s, &pal);
+  if (pt != font_pt || !fnorm_w)
+    {
+      if (open_fonts (pt) == 0) { set_metrics (pt); changed = 1; }
+    }
+  if (!windows_made) return;
+  if (changed)
+    {
+      for (i = 0; i < nbufs; i++) bufs[i]->layout_width = 0;			/* every conversation is laid out again when it is shown */
+      win_width = 0;								/* the idle loop sees a new size: it lays the current one out, sets the extents and redraws */
+      want_bottom = 1;
+    }
+  force_redraw (win_main); force_redraw (win_left); force_redraw (win_right); force_redraw (win_topic);
 }
 
 /* ---- creating the windows ---- */
@@ -1470,12 +1549,12 @@ static void make_windows (void)
 {
   wimp_point off, size;
   icon_createblock ic;
-  win_main = make_window (80, 120, 1480, 860, 0xBF000002u, 0, 1400, 600, titlebuf, MIN_W, 400, 3);	/* vertical scroll bar, size box, title bar with indirected text; not redrawn by the Wimp */
+  win_main = make_window (80, 120, 1480, 860, 0xBF000002u, 255, 1400, 600, titlebuf, MIN_W, 400, 3);	/* vertical scroll bar, size box, title bar with indirected text; not redrawn by the Wimp */
   Pane2_AddMain (win_main);
   /* the panes: flags 0x90000000 is a window with a vertical scroll bar and nothing else, 0x80000000 one with nothing: neither can be moved */
-  win_left = make_window (80, 120, 80 + LEFT_W, 700, 0x90000000u | 0x20u, 1, LEFT_W, 600, "", 20, 20, 3);
-  win_right = make_window (1100, 120, 1100 + RIGHT_W, 700, 0x90000000u | 0x20u, 1, RIGHT_W, 600, "", 20, 20, 5);
-  win_topic = make_window (80, 800, 1400, 800 + TOP_H, 0x80000000u | 0x20u, 0, 4000, TOP_H, "", 20, 20, 3);
+  win_left = make_window (80, 120, 80 + LEFT_W, 700, 0x90000000u | 0x20u, 255, LEFT_W, 600, "", 20, 20, 3);
+  win_right = make_window (1100, 120, 1100 + RIGHT_W, 700, 0x90000000u | 0x20u, 255, RIGHT_W, 600, "", 20, 20, 5);
+  win_topic = make_window (80, 800, 1400, 800 + TOP_H, 0x80000000u | 0x20u, 255, 4000, TOP_H, "", 20, 20, 3);
   win_input = make_window (80, 120, 1400, 120 + BOT_H, 0x80000000u | 0x20u | 0x10u, 1, 4000, BOT_H, "", 20, 20, 3);	/* 0x10: the Wimp redraws it (it has only icons): a window that asks to be redrawn and is not gets asked for ever */
   /* the first pane that is added is the one in front: the input line and the topic, then the lists, which stretch down to the bottom of the window behind the input line */
   off.x = 0; off.y = 0; size.x = 1400; size.y = BOT_H;
@@ -1522,14 +1601,6 @@ static void log_geometry (const char *when)
     }
 }
 
-static void open_fonts (void)
-{
-  if (Font_FindFont ((font_handle *) &fnorm_w, "Homerton.Medium\\EUTF8", 11 * 16, 11 * 16, 0, 0) && Font_FindFont ((font_handle *) &fnorm_w, "Homerton.Medium", 11 * 16, 11 * 16, 0, 0))
-    Error_ReportFatal (0, "Natter needs the font Homerton.Medium");
-  if (Font_FindFont ((font_handle *) &fbold_w, "Homerton.Bold\\EUTF8", 11 * 16, 11 * 16, 0, 0)) fbold_w = fnorm_w;
-  if (Font_FindFont ((font_handle *) &fital_w, "Homerton.Medium.Oblique\\EUTF8", 11 * 16, 11 * 16, 0, 0)) fital_w = fnorm_w;
-}
-
 int main (void)
 {
   irc_config cfg;
@@ -1543,9 +1614,12 @@ int main (void)
   EventMsg_Initialise ();
   event_mask.data.null = 0;
   read_timezone ();
-  open_fonts ();
+  settings_load (&cfg_set, CHOICES_READ);
+  apply_appearance (&cfg_set);							/* the colours, the fonts and the sizes that come from the size of the text */
+  if (!fnorm_w) Error_ReportFatal (0, "Natter needs the font Homerton.Medium");
   LOG ("fonts open: %d %d %d", (int) fnorm, (int) fbold, (int) fital);
   make_windows ();
+  windows_made = 1;
   LOG ("windows made: main %x left %x right %x topic %x input %x", (unsigned) win_main, (unsigned) win_left, (unsigned) win_right, (unsigned) win_topic, (unsigned) win_input);
   Event_Claim (event_REDRAW, win_main, event_ANY, main_redraw, NULL);
   Event_Claim (event_REDRAW, win_left, event_ANY, left_redraw, NULL);
@@ -1564,10 +1638,10 @@ int main (void)
   Event_Claim (event_NULL, event_ANY, event_ANY, null_handler, NULL);
   build_menus ();
   choices_init (&ch_callbacks);
+  appearance_init (&ap_callbacks);
   make_bar_icon ();
   if (bar_icon >= 0) { have_icon = 1; Event_Claim (event_CLICK, window_ICONBAR, bar_icon, icon_click, NULL); }
   LOG ("icon bar icon %d", (int) bar_icon);
-  settings_load (&cfg_set, CHOICES_READ);
   snprintf (logdir, sizeof logdir, "%s", cfg_set.logdir[0] ? cfg_set.logdir : "<Choices$Write>.Natter.Logs");
   lg = logger_new (logdir, ".");
   if (cfg_set.nnets == 0)								/* no choices yet: a first network to start from */

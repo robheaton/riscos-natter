@@ -7,3 +7,5 @@ app/out/
 app/test_buffer
 tests/net/*.pyc
 app/test_settings
+app/test_logfile
+app/test_theme
