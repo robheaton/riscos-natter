@@ -997,7 +997,7 @@ static BOOL key_handler (event_pollblock *event, void *reference)
   switch (code)
     {
     case 13: tabbing = 0; submit_input (); return TRUE;
-    case 9: complete_nick (); return TRUE;
+    case 9: case 0x18A: complete_nick (); return TRUE;			/* Tab: the key gives &18A, Ctrl-I gives 9 */
     case 3: copy_selection (); return TRUE;					/* Ctrl-C */
     case 22: clip_paste (win_input, ic_input, paste_into_input, NULL); return TRUE;	/* Ctrl-V */
     case 0x18F:								/* up arrow: the previous line that was typed */

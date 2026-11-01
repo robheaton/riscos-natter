@@ -295,10 +295,10 @@ static BOOL key_handler (event_pollblock *event, void *reference)
   (void) reference;
   if (code == 13) { read_fields (); if (cb->saved) cb->saved (&ed); hide (1); return TRUE; }
   if (code == 27) { hide (0); return TRUE; }
-  if (code == 9 || code == 0x18E || code == 0x18F)					/* Tab and the arrows go from field to field */
+  if (code == 9 || code == 0x18A || code == 0x19A || code == 0x18E || code == 0x18F)	/* Tab (the key gives &18A, Ctrl-I gives 9), Shift-Tab and the arrows go from field to field */
     {
       for (k = 0; k < norder; k++) if (order[k] == here) break;
-      k = (code == 0x18F) ? (k <= 0 ? norder - 1 : k - 1) : (k + 1 >= norder ? 0 : k + 1);
+      k = (code == 0x18F || code == 0x19A) ? (k <= 0 ? norder - 1 : k - 1) : (k + 1 >= norder ? 0 : k + 1);
       Icon_SetCaret (win, order[k]);
       return TRUE;
     }
